@@ -8,6 +8,19 @@ import { computeMetrics, landingPageScore, runDiagnosis } from '@/lib/diagnosis'
 import { AdMetrics, BenchmarkSettings, BusinessInputs, DemoScenario, Lang, LandingPageAuditInput, Severity } from '@/lib/types';
 
 const tabs = ['dashboard', 'funnel', 'creative', 'landing', 'product', 'strategy', 'report', 'inputs', 'settings'] as const;
+const requiredMetricFields: (keyof AdMetrics)[] = [
+  'spend',
+  'purchases',
+  'impressions',
+  'threeSecViews',
+  'thruPlays',
+  'linkClicks',
+  'uniqueOutboundClicks',
+  'landingPageViews',
+  'checkoutsInitiated',
+  'contentViews',
+  'costPerResult'
+];
 
 const sevClass: Record<Severity, string> = {
   low: 'bg-emerald-500/15 text-emerald-300',
@@ -19,6 +32,93 @@ const sevClass: Record<Severity, string> = {
 const percent = (v: number) => `${(v * 100).toFixed(2)}%`;
 const money = (v: number) => `$${v.toFixed(2)}`;
 
+
+const parseCsvText = (text: string): Record<string, string>[] => {
+  const rows: string[][] = [];
+  let current = '';
+  let row: string[] = [];
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      row.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && next === '\n') i += 1;
+      if (current.length > 0 || row.length > 0) {
+        row.push(current.trim());
+        rows.push(row);
+      }
+      row = [];
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.length > 0 || row.length > 0) {
+    row.push(current.trim());
+    rows.push(row);
+  }
+
+  if (!rows.length) return [];
+
+  const headers = rows[0];
+  return rows.slice(1).map((values) => {
+    const obj: Record<string, string> = {};
+    headers.forEach((header, idx) => {
+      obj[header] = values[idx] ?? '';
+    });
+    return obj;
+  });
+};
+
+const parseNum = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const cleaned = String(value).replace(/[$,%\s]/g, '').replace(/,/g, '');
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const aggregateMappedMetrics = (rows: Record<string, string>[], mapping: Partial<Record<keyof AdMetrics, string>>): AdMetrics => {
+  const output: AdMetrics = { ...defaultMetrics };
+
+  requiredMetricFields.forEach((field) => {
+    const mappedCol = mapping[field];
+    if (!mappedCol) {
+      output[field] = field === 'costPerResult' ? parseNum(output.costPerResult) : 0;
+      return;
+    }
+
+    const sum = rows.reduce((total, row) => total + parseNum(row[mappedCol]), 0);
+    output[field] = sum;
+  });
+
+  if (output.costPerResult <= 0 && output.purchases > 0) {
+    output.costPerResult = output.spend / output.purchases;
+  }
+
+  return output;
+};
+
 export default function CopilotApp() {
   const [lang, setLang] = useState<Lang>('en');
   const [tab, setTab] = useState<(typeof tabs)[number]>('dashboard');
@@ -26,6 +126,19 @@ export default function CopilotApp() {
   const [business, setBusiness] = useState<BusinessInputs>(defaultBusiness);
   const [benchmarks, setBenchmarks] = useState<BenchmarkSettings>(defaultBenchmarks);
   const [audit, setAudit] = useState<LandingPageAuditInput>(defaultAudit);
+
+  const [dataMode, setDataMode] = useState<'demo' | 'upload'>('demo');
+  const [entryMethod, setEntryMethod] = useState<'csv' | 'manual'>('csv');
+  const [uploadStep, setUploadStep] = useState<'source' | 'mapping' | 'manual' | 'review'>('source');
+  const [fileName, setFileName] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [parseError, setParseError] = useState('');
+  const [uploadSuccess, setUploadSuccess] = useState('');
+  const [csvColumns, setCsvColumns] = useState<string[]>([]);
+  const [csvRows, setCsvRows] = useState<Record<string, string>[]>([]);
+  const [mapping, setMapping] = useState<Partial<Record<keyof AdMetrics, string>>>({});
+  const [mappingWarning, setMappingWarning] = useState('');
+  const [manualDraft, setManualDraft] = useState<AdMetrics>({ ...defaultMetrics, ...Object.fromEntries(requiredMetricFields.map((f) => [f, 0])) } as AdMetrics);
 
   const computed = useMemo(() => computeMetrics(metrics, business), [metrics, business]);
   const diagnoses = useMemo(() => runDiagnosis(metrics, benchmarks, computed), [metrics, benchmarks, computed]);
@@ -47,21 +160,78 @@ export default function CopilotApp() {
     { name: 'Purchases', value: metrics.purchases }
   ];
 
-  const recommendation = computed.profitPerOrder > 0 && computed.roas >= business.targetROAS ? t(lang, 'scale') : computed.profitPerOrder > -5 ? t(lang, 'hold') : t(lang, 'kill');
+  const recommendation =
+    computed.profitPerOrder > 0 && computed.roas >= business.targetROAS ? t(lang, 'scale') : computed.profitPerOrder > -5 ? t(lang, 'hold') : t(lang, 'kill');
+
+  const topRecommendations = diagnoses.slice(0, 3);
 
   const onScenario = (scenario: DemoScenario) => {
     setMetrics(scenario.metrics);
     setAudit(scenario.audit);
+    setDataMode('demo');
   };
 
-  const onCsv = (text: string) => {
-    const [header, row] = text.trim().split('\n');
-    if (!header || !row) return;
-    const keys = header.split(',').map((s) => s.trim());
-    const values = row.split(',').map((s) => Number(s.trim()));
-    const parsed: Record<string, number> = {};
-    keys.forEach((k, i) => (parsed[k] = values[i]));
-    setMetrics((m) => ({ ...m, ...parsed }));
+  const resetUpload = () => {
+    setUploadStep('source');
+    setFileName('');
+    setParseError('');
+    setUploadSuccess('');
+    setCsvColumns([]);
+    setCsvRows([]);
+    setMapping({});
+    setMappingWarning('');
+    setEntryMethod('csv');
+  };
+
+  const handleCsvFile = async (file: File) => {
+    setParseError('');
+    setUploadSuccess('');
+    setMappingWarning('');
+    setFileName(file.name);
+
+    try {
+      const text = await file.text();
+      const rows = parseCsvText(text).filter((row) => Object.values(row).some((value) => String(value || '').trim().length > 0));
+
+      if (!rows.length) {
+        setParseError(t(lang, 'emptyCsv'));
+        return;
+      }
+
+      const headers = Object.keys(rows[0]);
+      setCsvRows(rows);
+      setCsvColumns(headers);
+      setUploadSuccess(t(lang, 'uploadSuccess'));
+
+      const nextMapping: Partial<Record<keyof AdMetrics, string>> = {};
+      requiredMetricFields.forEach((field) => {
+        const found = headers.find((h) => h.toLowerCase().replace(/\s+/g, '') === field.toLowerCase().replace(/\s+/g, ''));
+        if (found) nextMapping[field] = found;
+      });
+      setMapping(nextMapping);
+      setUploadStep('mapping');
+    } catch (error) {
+      setParseError(error instanceof Error ? error.message : t(lang, 'csvParseError'));
+    }
+  };
+
+  const applyMapping = () => {
+    const missing = requiredMetricFields.filter((field) => !mapping[field]);
+    if (missing.length) {
+      setMappingWarning(`${t(lang, 'mappingIncomplete')}: ${missing.join(', ')}`);
+      return;
+    }
+
+    const mappedMetrics = aggregateMappedMetrics(csvRows, mapping);
+    setMetrics(mappedMetrics);
+    setUploadStep('review');
+    setMappingWarning('');
+  };
+
+  const submitManualEntry = () => {
+    setMetrics({ ...manualDraft, costPerResult: manualDraft.costPerResult || (manualDraft.purchases > 0 ? manualDraft.spend / manualDraft.purchases : 0) });
+    setUploadStep('review');
+    setParseError('');
   };
 
   return (
@@ -73,10 +243,150 @@ export default function CopilotApp() {
         </div>
         <div className="card flex items-center gap-2 p-2">
           <span className="text-sm">{t(lang, 'language')}</span>
-          <button className={`rounded px-3 py-1 ${lang === 'en' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => setLang('en')}>{t(lang, 'english')}</button>
-          <button className={`rounded px-3 py-1 ${lang === 'ar' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => setLang('ar')}>{t(lang, 'arabic')}</button>
+          <button className={`rounded px-3 py-1 ${lang === 'en' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => setLang('en')}>
+            {t(lang, 'english')}
+          </button>
+          <button className={`rounded px-3 py-1 ${lang === 'ar' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => setLang('ar')}>
+            {t(lang, 'arabic')}
+          </button>
         </div>
       </header>
+
+      <section className="mb-5 card flex flex-wrap items-center gap-3 text-sm">
+        <span className="text-slate-300">{t(lang, 'mode')}:</span>
+        <button
+          className={`rounded px-3 py-1 ${dataMode === 'demo' ? 'bg-blue-600' : 'bg-slate-700'}`}
+          onClick={() => {
+            setDataMode('demo');
+            setMetrics(defaultMetrics);
+          }}
+        >
+          {t(lang, 'demoMode')}
+        </button>
+        <button
+          className={`rounded px-3 py-1 ${dataMode === 'upload' ? 'bg-blue-600' : 'bg-slate-700'}`}
+          onClick={() => {
+            setDataMode('upload');
+            setUploadStep('source');
+          }}
+        >
+          {t(lang, 'uploadYourData')}
+        </button>
+        <span className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-300">
+          {dataMode === 'demo' ? t(lang, 'usingDemoData') : `${t(lang, 'usingUploadedData')}${fileName ? `: ${fileName}` : ''}`}
+        </span>
+      </section>
+
+      {dataMode === 'upload' && (
+        <section className="mb-5 card space-y-4">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <button className={`rounded px-3 py-1 ${entryMethod === 'csv' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => { setEntryMethod('csv'); setUploadStep('source'); }}>
+              {t(lang, 'uploadCsv')}
+            </button>
+            <button className={`rounded px-3 py-1 ${entryMethod === 'manual' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => { setEntryMethod('manual'); setUploadStep('manual'); }}>
+              {t(lang, 'manualEntry')}
+            </button>
+            <button onClick={resetUpload} className="rounded bg-slate-700 px-3 py-1">
+              {t(lang, 'resetUpload')}
+            </button>
+          </div>
+
+          {entryMethod === 'csv' && uploadStep === 'source' && (
+            <>
+              <div
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setIsDragOver(true);
+                }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setIsDragOver(false);
+                  const file = event.dataTransfer.files?.[0];
+                  if (file) handleCsvFile(file);
+                }}
+                className={`rounded-xl border-2 border-dashed p-6 text-center ${isDragOver ? 'border-blue-400 bg-blue-500/10' : 'border-slate-700 bg-slate-900'}`}
+              >
+                <p className="mb-2 text-sm text-slate-300">{t(lang, 'dragDropCsv')}</p>
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) handleCsvFile(file);
+                  }}
+                  className="mx-auto block"
+                />
+              </div>
+              {uploadSuccess && <p className="text-sm text-emerald-300">{uploadSuccess}</p>}
+              {parseError && <p className="text-sm text-red-300">{t(lang, 'csvParseError')}: {parseError}</p>}
+              <a href="/sample-template.csv" className="text-sm underline">
+                {t(lang, 'csvTemplate')}
+              </a>
+            </>
+          )}
+
+          {entryMethod === 'csv' && uploadStep === 'mapping' && (
+            <div className="space-y-3">
+              <p className="font-semibold">{t(lang, 'mapColumns')}</p>
+              <p className="text-sm text-slate-300">{t(lang, 'mapColumnsHint')}</p>
+              <div className="grid gap-2 md:grid-cols-2">
+                {requiredMetricFields.map((field) => (
+                  <label key={field} className="flex items-center justify-between gap-3 rounded bg-slate-800 p-2 text-sm">
+                    <span>{field}</span>
+                    <select
+                      value={mapping[field] ?? ''}
+                      onChange={(event) => setMapping((prev) => ({ ...prev, [field]: event.target.value || undefined }))}
+                      className="w-52 rounded bg-slate-900 p-1"
+                    >
+                      <option value="">{t(lang, 'selectColumn')}</option>
+                      {csvColumns.map((col) => (
+                        <option key={col} value={col}>
+                          {col}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+              {mappingWarning && <p className="text-sm text-amber-300">{mappingWarning}</p>}
+              <button onClick={applyMapping} className="rounded bg-blue-600 px-4 py-2 text-sm">
+                {t(lang, 'applyMapping')}
+              </button>
+            </div>
+          )}
+
+          {entryMethod === 'manual' && uploadStep === 'manual' && (
+            <div className="space-y-3">
+              <p className="font-semibold">{t(lang, 'manualEntry')}</p>
+              <div className="grid gap-2 md:grid-cols-2">
+                {requiredMetricFields.map((field) => (
+                  <label key={field} className="flex items-center justify-between gap-3 rounded bg-slate-800 p-2 text-sm">
+                    <span>{field}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      value={manualDraft[field]}
+                      onChange={(event) => setManualDraft((prev) => ({ ...prev, [field]: parseNum(event.target.value) }))}
+                      className="w-44 rounded bg-slate-900 p-1"
+                    />
+                  </label>
+                ))}
+              </div>
+              <button onClick={submitManualEntry} className="rounded bg-blue-600 px-4 py-2 text-sm">
+                {t(lang, 'runAnalysis')}
+              </button>
+            </div>
+          )}
+
+          {uploadStep === 'review' && (
+            <div className="rounded bg-emerald-500/10 p-3 text-sm text-emerald-300">
+              {t(lang, 'analysisReady')}
+            </div>
+          )}
+        </section>
+      )}
 
       <nav className="mb-5 grid grid-cols-2 gap-2 md:grid-cols-5 lg:grid-cols-9">
         {tabs.map((tb) => (
@@ -87,7 +397,12 @@ export default function CopilotApp() {
       </nav>
 
       <section className="mb-5 grid gap-3 md:grid-cols-4">
-        {[{ k: 'accountHealthScore', v: accountHealth }, { k: 'creativeQualityScore', v: creativeScore }, { k: 'landingScore', v: lpScore }, { k: 'productPotential', v: productScore }].map((c) => (
+        {[
+          { k: 'accountHealthScore', v: accountHealth },
+          { k: 'creativeQualityScore', v: creativeScore },
+          { k: 'landingScore', v: lpScore },
+          { k: 'productPotential', v: productScore }
+        ].map((c) => (
           <div key={c.k} className="card">
             <p className="text-sm text-slate-400">{t(lang, c.k)}</p>
             <p className="text-3xl font-bold">{Math.max(0, Math.min(100, c.v))}</p>
@@ -109,8 +424,32 @@ export default function CopilotApp() {
             </ResponsiveContainer>
           </div>
           <div className="card space-y-2 text-sm">
-            <p>Spend: {money(metrics.spend)}</p><p>Purchases: {metrics.purchases}</p><p>CPA: {money(computed.cpa)}</p><p>ROAS: {computed.roas.toFixed(2)}</p>
-            <p>Impressions: {metrics.impressions.toLocaleString()}</p><p>Link Clicks: {metrics.linkClicks}</p><p>Unique Outbound Clicks: {metrics.uniqueOutboundClicks}</p><p>Landing Page Views: {metrics.landingPageViews}</p><p>Checkouts Initiated: {metrics.checkoutsInitiated}</p><p>Outbound CTR: {percent(computed.outboundCtr)}</p><p>Cost/Result: {money(metrics.costPerResult)}</p><p>Cost/LPV: {money(computed.costPerLpv)}</p>
+            <p>Spend: {money(metrics.spend)}</p>
+            <p>Purchases: {metrics.purchases}</p>
+            <p>CPA: {money(computed.cpa)}</p>
+            <p>ROAS: {computed.roas.toFixed(2)}</p>
+            <p>Impressions: {metrics.impressions.toLocaleString()}</p>
+            <p>Link Clicks: {metrics.linkClicks}</p>
+            <p>Unique Outbound Clicks: {metrics.uniqueOutboundClicks}</p>
+            <p>Landing Page Views: {metrics.landingPageViews}</p>
+            <p>Checkouts Initiated: {metrics.checkoutsInitiated}</p>
+            <p>Cost/Result: {money(metrics.costPerResult)}</p>
+            <p>Cost/LPV: {money(computed.costPerLpv)}</p>
+            <p>LPV Rate: {percent(computed.lpvRate)}</p>
+          </div>
+          <div className="card lg:col-span-3 grid gap-3 md:grid-cols-3">
+            {topRecommendations.length ? (
+              topRecommendations.map((d) => (
+                <div key={d.id} className="rounded bg-slate-800 p-3 text-sm">
+                  <p className="mb-1 font-semibold">{t(lang, d.issueKey)}</p>
+                  <p className="mb-1 text-xs text-slate-300">{d.evidence}</p>
+                  <p className="mb-2 text-xs text-slate-400">{t(lang, d.reasonKey)}</p>
+                  <p className="text-xs text-blue-300">{t(lang, d.actionKey)}</p>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-emerald-300">{t(lang, 'noCriticalIssues')}</p>
+            )}
           </div>
         </section>
       )}
@@ -118,10 +457,30 @@ export default function CopilotApp() {
       {tab === 'funnel' && (
         <section className="card overflow-x-auto">
           <table className="w-full text-sm">
-            <thead><tr className="text-left text-slate-400"><th>Step</th><th>{t(lang, 'metricValue')}</th><th>{t(lang, 'conversionRate')}</th><th>{t(lang, 'benchmark')}</th><th>{t(lang, 'severity')}</th><th>{t(lang, 'diagnosis')}</th><th>{t(lang, 'action')}</th></tr></thead>
+            <thead>
+              <tr className="text-left text-slate-400">
+                <th>Step</th>
+                <th>{t(lang, 'metricValue')}</th>
+                <th>{t(lang, 'conversionRate')}</th>
+                <th>{t(lang, 'benchmark')}</th>
+                <th>{t(lang, 'severity')}</th>
+                <th>{t(lang, 'diagnosis')}</th>
+                <th>{t(lang, 'action')}</th>
+              </tr>
+            </thead>
             <tbody>
               {diagnoses.map((d) => (
-                <tr key={d.id} className="border-t border-slate-800 align-top"><td className="py-2">{t(lang, d.issueKey)}</td><td>{d.evidence.split(' vs ')[0]}</td><td>-</td><td>{d.evidence.split(' vs ')[1]}</td><td><span className={`rounded px-2 py-1 text-xs ${sevClass[d.severity]}`}>{severityLabels[lang][d.severity]}</span></td><td>{t(lang, d.reasonKey)}</td><td>{t(lang, d.actionKey)}</td></tr>
+                <tr key={d.id} className="border-t border-slate-800 align-top">
+                  <td className="py-2">{t(lang, d.issueKey)}</td>
+                  <td>{d.evidence.split(' vs ')[0]}</td>
+                  <td>-</td>
+                  <td>{d.evidence.split(' vs ')[1]}</td>
+                  <td>
+                    <span className={`rounded px-2 py-1 text-xs ${sevClass[d.severity]}`}>{severityLabels[lang][d.severity]}</span>
+                  </td>
+                  <td>{t(lang, d.reasonKey)}</td>
+                  <td>{t(lang, d.actionKey)}</td>
+                </tr>
               ))}
             </tbody>
           </table>
@@ -133,13 +492,21 @@ export default function CopilotApp() {
           <div className="card space-y-2 text-sm">
             <p>Hook Rate = 3s views ÷ Impressions = {percent(computed.hookRate)}</p>
             <p>Hold Rate = ThruPlays ÷ Impressions = {percent(computed.holdRate)}</p>
+            <p>Landing Page View Rate = LPV ÷ Link Clicks = {percent(computed.lpvRate)}</p>
             <p>Purchases ÷ Link Clicks = {percent(computed.purchasePerLinkClick)}</p>
             <p>Purchases ÷ Unique Outbound Clicks = {percent(computed.purchasePerOutboundClick)}</p>
-            <p>Outbound CTR = {percent(computed.outboundCtr)}</p>
+            <p>Purchases ÷ Landing Page Views = {percent(computed.purchasePerLpv)}</p>
+            <p>LP to Checkout Rate = {percent(computed.lpToCheckoutRate)}</p>
             <p>Cost per Result = {money(metrics.costPerResult)}</p>
+            <p>Cost per LPV = {money(computed.costPerLpv)}</p>
           </div>
           <div className="card space-y-2">
-            {diagnoses.slice(0, 3).map((d) => <div key={d.id} className="rounded bg-slate-800 p-3 text-sm"><p className="font-semibold">{t(lang, d.issueKey)}</p><p>{t(lang, d.actionKey)}</p></div>)}
+            {diagnoses.slice(0, 3).map((d) => (
+              <div key={d.id} className="rounded bg-slate-800 p-3 text-sm">
+                <p className="font-semibold">{t(lang, d.issueKey)}</p>
+                <p>{t(lang, d.actionKey)}</p>
+              </div>
+            ))}
           </div>
         </section>
       )}
@@ -149,11 +516,31 @@ export default function CopilotApp() {
           <div className="card space-y-2">
             <label className="text-sm">{t(lang, 'lpUrl')}</label>
             <input value={audit.url} onChange={(e) => setAudit({ ...audit, url: e.target.value })} className="w-full rounded bg-slate-800 p-2" />
-            {(['pageSpeedScore', 'mobileUsabilityScore', 'headlineClarityScore', 'ctaVisibilityScore', 'trustElementsScore', 'offerClarityScore', 'structureFlowScore'] as const).map((k) => (
-              <div key={k} className="flex items-center gap-2 text-sm"><span className="w-44">{k}</span><input type="range" min={0} max={100} value={audit[k]} onChange={(e) => setAudit({ ...audit, [k]: Number(e.target.value) })} className="flex-1" /><span>{audit[k]}</span></div>
+            {(
+              [
+                'pageSpeedScore',
+                'mobileUsabilityScore',
+                'headlineClarityScore',
+                'ctaVisibilityScore',
+                'trustElementsScore',
+                'offerClarityScore',
+                'structureFlowScore'
+              ] as const
+            ).map((k) => (
+              <div key={k} className="flex items-center gap-2 text-sm">
+                <span className="w-44">{k}</span>
+                <input type="range" min={0} max={100} value={audit[k]} onChange={(e) => setAudit({ ...audit, [k]: Number(e.target.value) })} className="flex-1" />
+                <span>{audit[k]}</span>
+              </div>
             ))}
           </div>
-          <div className="card"><p className="text-xl font-bold">{t(lang, 'landingScore')}: {lpScore}/100</p><p className="mt-2 text-sm text-slate-300">Likely issues: page speed friction, low trust blocks, weak offer framing.</p><p className="mt-2 text-sm">Suggested improvements: compress media, sticky CTA, add testimonials, clarify shipping and returns.</p></div>
+          <div className="card">
+            <p className="text-xl font-bold">
+              {t(lang, 'landingScore')}: {lpScore}/100
+            </p>
+            <p className="mt-2 text-sm text-slate-300">Likely issues: page speed friction, low trust blocks, weak offer framing.</p>
+            <p className="mt-2 text-sm">Suggested improvements: compress media, sticky CTA, add testimonials, clarify shipping and returns.</p>
+          </div>
         </section>
       )}
 
@@ -166,7 +553,12 @@ export default function CopilotApp() {
             <p>Break-even CPA: {money(business.breakEvenCPA)}</p>
             <p className={computed.profitPerOrder > 0 ? 'text-emerald-300' : 'text-red-300'}>{computed.profitPerOrder > 0 ? t(lang, 'profitable') : t(lang, 'notProfitable')}</p>
           </div>
-          <div className="card"><p className="font-semibold">Decision: {recommendation}</p><p className="text-sm text-slate-300 mt-2">If profitability is weak despite good conversion, treat as pricing/COGS issue and avoid scaling until economics improve.</p></div>
+          <div className="card">
+            <p className="font-semibold">Decision: {recommendation}</p>
+            <p className="text-sm text-slate-300 mt-2">
+              If profitability is weak despite good conversion, treat as pricing/COGS issue and avoid scaling until economics improve.
+            </p>
+          </div>
         </section>
       )}
 
@@ -181,15 +573,35 @@ export default function CopilotApp() {
 
       {tab === 'report' && (
         <section className="card space-y-3">
-          <p><strong>{t(lang, 'mainBottleneck')}:</strong> {diagnoses[0] ? t(lang, diagnoses[0].issueKey) : 'No critical issues'}</p>
-          <p><strong>{t(lang, 'secondaryBottleneck')}:</strong> {diagnoses[1] ? t(lang, diagnoses[1].issueKey) : 'N/A'}</p>
-          <p><strong>{t(lang, 'rootCause')}:</strong> {diagnoses[0] ? t(lang, diagnoses[0].reasonKey) : 'Healthy conversion chain.'}</p>
-          <p><strong>{t(lang, 'nextActions')}:</strong></p>
-          <ol className="list-decimal ps-5">{diagnoses.slice(0, 3).map((d) => <li key={d.id}>{t(lang, d.actionKey)}</li>)}</ol>
-          <p><strong>{t(lang, 'campaignStructure')}:</strong> {computed.roas > business.targetROAS ? 'CBO + controlled duplication of winners' : 'ABO testing pods with strict kill rules'}</p>
-          <p><strong>{t(lang, 'landingPriority')}:</strong> Speed, trust, checkout clarity.</p>
-          <p><strong>{t(lang, 'creativePriority')}:</strong> Hooks, pacing, offer communication.</p>
-          <button onClick={() => window.print()} className="rounded bg-blue-600 px-4 py-2 text-sm">{t(lang, 'exportReport')}</button>
+          <p>
+            <strong>{t(lang, 'mainBottleneck')}:</strong> {diagnoses[0] ? t(lang, diagnoses[0].issueKey) : t(lang, 'noCriticalIssues')}
+          </p>
+          <p>
+            <strong>{t(lang, 'secondaryBottleneck')}:</strong> {diagnoses[1] ? t(lang, diagnoses[1].issueKey) : 'N/A'}
+          </p>
+          <p>
+            <strong>{t(lang, 'rootCause')}:</strong> {diagnoses[0] ? t(lang, diagnoses[0].reasonKey) : 'Healthy conversion chain.'}
+          </p>
+          <p>
+            <strong>{t(lang, 'nextActions')}:</strong>
+          </p>
+          <ol className="list-decimal ps-5">
+            {diagnoses.slice(0, 3).map((d) => (
+              <li key={d.id}>{t(lang, d.actionKey)}</li>
+            ))}
+          </ol>
+          <p>
+            <strong>{t(lang, 'campaignStructure')}:</strong> {computed.roas > business.targetROAS ? 'CBO + controlled duplication of winners' : 'ABO testing pods with strict kill rules'}
+          </p>
+          <p>
+            <strong>{t(lang, 'landingPriority')}:</strong> Speed, trust, checkout clarity.
+          </p>
+          <p>
+            <strong>{t(lang, 'creativePriority')}:</strong> Hooks, pacing, offer communication.
+          </p>
+          <button onClick={() => window.print()} className="rounded bg-blue-600 px-4 py-2 text-sm">
+            {t(lang, 'exportReport')}
+          </button>
         </section>
       )}
 
@@ -198,20 +610,22 @@ export default function CopilotApp() {
           <div className="card space-y-2 text-sm">
             <p className="font-semibold">{t(lang, 'scenariosTitle')}</p>
             {demoScenarios.map((s) => (
-              <button key={s.id} onClick={() => onScenario(s)} className="block w-full rounded bg-slate-800 px-3 py-2 text-left">{t(lang, s.labelKey)} — {t(lang, s.descriptionKey)}</button>
+              <button key={s.id} onClick={() => onScenario(s)} className="block w-full rounded bg-slate-800 px-3 py-2 text-left">
+                {t(lang, s.labelKey)} — {t(lang, s.descriptionKey)}
+              </button>
             ))}
           </div>
           <div className="card space-y-3 text-sm">
-            <a href="/sample-template.csv" className="underline">{t(lang, 'csvTemplate')}</a>
-            <input type="file" accept=".csv" onChange={async (e) => {
-              const file = e.target.files?.[0];
-              if (!file) return;
-              const txt = await file.text();
-              onCsv(txt);
-            }} />
-            <textarea className="h-28 w-full rounded bg-slate-800 p-2" placeholder='{"spend":5000,"purchases":80}' onBlur={(e) => {
-              try { setMetrics((m) => ({ ...m, ...JSON.parse(e.target.value) })); } catch {}
-            }} />
+            <p>{t(lang, 'inputsHint')}</p>
+            <button
+              className="rounded bg-slate-700 px-3 py-2"
+              onClick={() => {
+                setDataMode('upload');
+                setTab('dashboard');
+              }}
+            >
+              {t(lang, 'goToUploadFlow')}
+            </button>
           </div>
         </section>
       )}
@@ -220,11 +634,21 @@ export default function CopilotApp() {
         <section className="grid gap-4 lg:grid-cols-2">
           <div className="card space-y-2">
             <p className="font-semibold">{t(lang, 'benchmarkSettings')}</p>
-            {Object.entries(benchmarks).map(([k, v]) => <label key={k} className="flex items-center justify-between gap-3 text-sm"><span>{k}</span><input type="number" step="0.01" value={v} onChange={(e) => setBenchmarks({ ...benchmarks, [k]: Number(e.target.value) })} className="w-28 rounded bg-slate-800 p-1" /></label>)}
+            {Object.entries(benchmarks).map(([k, v]) => (
+              <label key={k} className="flex items-center justify-between gap-3 text-sm">
+                <span>{k}</span>
+                <input type="number" step="0.01" value={v} onChange={(e) => setBenchmarks({ ...benchmarks, [k]: Number(e.target.value) })} className="w-28 rounded bg-slate-800 p-1" />
+              </label>
+            ))}
           </div>
           <div className="card space-y-2">
             <p className="font-semibold">{t(lang, 'businessInputs')}</p>
-            {Object.entries(business).map(([k, v]) => <label key={k} className="flex items-center justify-between gap-3 text-sm"><span>{k}</span><input type="number" step="0.1" value={v} onChange={(e) => setBusiness({ ...business, [k]: Number(e.target.value) })} className="w-28 rounded bg-slate-800 p-1" /></label>)}
+            {Object.entries(business).map(([k, v]) => (
+              <label key={k} className="flex items-center justify-between gap-3 text-sm">
+                <span>{k}</span>
+                <input type="number" step="0.1" value={v} onChange={(e) => setBusiness({ ...business, [k]: Number(e.target.value) })} className="w-28 rounded bg-slate-800 p-1" />
+              </label>
+            ))}
           </div>
         </section>
       )}
