@@ -2,43 +2,27 @@
 
 import { useMemo, useState } from 'react';
 import { buildDiagnosis, buildMetrics } from '@/lib/diagnosis';
-import { CsvField, CsvMapping, GroupedCampaignData, MappingConfidence, MappingResult } from '@/lib/types';
+import { CsvField, CsvMapping, MappingResult, NormalizedRow } from '@/lib/types';
 
 type Lang = 'en' | 'ar';
+type FileKind = 'campaign' | 'adset' | 'ad';
 
-type ManualValues = Partial<Record<CsvField, string>>;
-
-const FIELDS: Array<{ key: CsvField; en: string; ar: string; numeric?: boolean }> = [
-  { key: 'productName', en: 'Product Name', ar: 'اسم المنتج' },
-  { key: 'campaignName', en: 'Campaign Name', ar: 'اسم الحملة' },
-  { key: 'adSetName', en: 'Ad Set Name', ar: 'اسم مجموعة الإعلانات' },
-  { key: 'creativeName', en: 'Ad / Creative Name', ar: 'اسم الإعلان / الكريتف' },
-  { key: 'spend', en: 'Spend', ar: 'الإنفاق', numeric: true },
-  { key: 'impressions', en: 'Impressions', ar: 'مرات الظهور', numeric: true },
-  { key: 'linkClicks', en: 'Link Clicks', ar: 'نقرات الرابط', numeric: true },
-  { key: 'landingPageViews', en: 'Landing Page Views', ar: 'زيارات صفحة الهبوط', numeric: true },
-  { key: 'purchases', en: 'Purchases', ar: 'المشتريات', numeric: true },
-  { key: 'costPerResult', en: 'Cost per Result', ar: 'تكلفة النتيجة', numeric: true },
-  { key: 'checkoutsInitiated', en: 'Checkouts Initiated', ar: 'بدء إتمام الشراء', numeric: true },
-  { key: 'threeSecViews', en: '3-second Video Plays', ar: 'مشاهدات 3 ثواني', numeric: true },
-  { key: 'thruPlays', en: 'ThruPlays', ar: 'ThruPlays', numeric: true },
-  { key: 'uniqueOutboundClicks', en: 'Unique Outbound Clicks', ar: 'نقرات خارجية فريدة', numeric: true },
-  { key: 'contentViews', en: 'Content Views', ar: 'مشاهدات المحتوى', numeric: true },
-  { key: 'landingPageUrl', en: 'Landing Page URL', ar: 'رابط صفحة الهبوط' },
-  { key: 'productCost', en: 'Product Cost', ar: 'تكلفة المنتج', numeric: true },
-  { key: 'shippingCost', en: 'Shipping Cost', ar: 'تكلفة الشحن', numeric: true },
-  { key: 'operationsCost', en: 'Operations Cost', ar: 'تكلفة التشغيل', numeric: true }
-];
+type Dataset = {
+  fileName: string;
+  rows: Record<string, string>[];
+  headers: string[];
+  mapping: CsvMapping;
+  mappingSignals: Partial<Record<CsvField, MappingResult>>;
+  kind: FileKind;
+};
 
 const text = {
   en: {
-    title: 'Ecommerce Funnel Analysis — Phase 1 Fix',
-    mode: 'Input Mode',
-    csv: 'Upload CSV',
-    manual: 'Manual Entry',
-    uploaded: 'Uploaded Data',
-    empty: 'No data yet. Upload CSV or use manual entry.',
-    map: 'Strict CSV mapping',
+    title: 'Ecommerce Funnel Analysis — Phase 1',
+    uploadCampaign: 'Upload Campaign-level CSV',
+    uploadAd: 'Upload Ad-level CSV',
+    onboarding: 'Upload your report / ارفع التقرير',
+    mapping: 'Auto-mapping (editable)',
     confidence: 'Confidence',
     high: 'High',
     medium: 'Medium',
@@ -48,27 +32,25 @@ const text = {
     campaign: 'Campaign',
     adset: 'Ad Set',
     creative: 'Creative / Ad',
-    search: 'Type to search...',
-    adsetMissing: 'Ad set data not available in this file',
-    creativeMissing: 'Creative data not available in this file',
-    available: 'Available metrics',
-    missingInputs: 'Missing inputs',
-    mainDiagnosis: 'Main diagnosis',
-    secondaryDiagnosis: 'Secondary diagnosis',
-    whatNext: 'What to do next',
-    unavailable: 'unavailable',
-    missingFields: 'missing required fields',
-    understanding: 'Understanding Metrics / شرح الأرقام',
-    language: 'Language'
+    search: 'Type to filter | اكتب للبحث',
+    adsetMissing: 'Ad set data not available in this file / بيانات الـ Ad Set غير موجودة في الملف',
+    creativeMissing: 'Creative data not available in this file / بيانات الكريتف غير موجودة في الملف',
+    available: 'Available Metrics / المؤشرات المتاحة',
+    missing: 'Missing Metrics / المؤشرات غير المتاحة',
+    unlock: 'How to unlock more analysis / ازاي تفتح تحليل أعمق',
+    unavailable: 'Unavailable — missing required data / غير متاح — البيانات المطلوبة ناقصة',
+    manual: 'Manual fallback values',
+    diagnosis: 'Diagnosis',
+    creativeBreakdown: 'Creative Performance Breakdown',
+    noCreative: 'Creative analysis unavailable until ad-level file exists.',
+    uploadedData: 'Uploaded Data / البيانات المرفوعة'
   },
   ar: {
-    title: 'تحليل الفانل — إصلاح المرحلة الأولى',
-    mode: 'وضع الإدخال',
-    csv: 'رفع CSV',
-    manual: 'إدخال يدوي',
-    uploaded: 'بيانات مرفوعة',
-    empty: 'لا توجد بيانات بعد. ارفع CSV أو أدخل يدويًا.',
-    map: 'ربط CSV بدقة',
+    title: 'تحليل فانل الإيكوميرس — المرحلة الأولى',
+    uploadCampaign: 'ارفع ملف CSV على مستوى الكامبين',
+    uploadAd: 'ارفع ملف CSV على مستوى الإعلان',
+    onboarding: 'ارفع التقرير / Upload your report',
+    mapping: 'الربط التلقائي (قابل للتعديل)',
     confidence: 'الثقة',
     high: 'عالية',
     medium: 'متوسطة',
@@ -76,355 +58,277 @@ const text = {
     select: 'تسلسل الاختيار',
     product: 'المنتج',
     campaign: 'الحملة',
-    adset: 'مجموعة الإعلانات',
-    creative: 'الإعلان / الكريتف',
-    search: 'اكتب للبحث...',
-    adsetMissing: 'Ad set data not available in this file',
-    creativeMissing: 'Creative data not available in this file',
-    available: 'المؤشرات المتاحة',
-    missingInputs: 'المدخلات الناقصة',
-    mainDiagnosis: 'التشخيص الأساسي',
-    secondaryDiagnosis: 'التشخيص الثانوي',
-    whatNext: 'ماذا تفعل الآن',
-    unavailable: 'غير متاح',
-    missingFields: 'بيانات مطلوبة ناقصة',
-    understanding: 'شرح الأرقام (Understanding Metrics)',
-    language: 'اللغة'
+    adset: 'Ad Set',
+    creative: 'الكريتف / الإعلان',
+    search: 'اكتب للبحث | Type to filter',
+    adsetMissing: 'بيانات الـ Ad Set غير موجودة في الملف / Ad set data not available in this file',
+    creativeMissing: 'بيانات الكريتف غير موجودة في الملف / Creative data not available in this file',
+    available: 'المؤشرات المتاحة / Available Metrics',
+    missing: 'المؤشرات غير المتاحة / Missing Metrics',
+    unlock: 'ازاي تفتح تحليل أعمق / How to unlock more analysis',
+    unavailable: 'غير متاح — البيانات المطلوبة ناقصة / Unavailable — missing required data',
+    manual: 'إدخال يدوي للقيم الناقصة',
+    diagnosis: 'التشخيص',
+    creativeBreakdown: 'تحليل أداء الكريتف',
+    noCreative: 'تحليل الكريتف غير متاح إلا بعد رفع ملف على مستوى الإعلان.',
+    uploadedData: 'البيانات المرفوعة / Uploaded Data'
   }
 };
 
-const normalize = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-const clean = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
-const toNum = (value: unknown): number | undefined => {
-  if (value === null || value === undefined) return undefined;
-  const raw = String(value).trim();
-  if (!raw) return undefined;
-  const numeric = Number(raw.replace(/[,$%\s]/g, '').replace(/,/g, ''));
-  return Number.isFinite(numeric) ? numeric : undefined;
-};
-
-const parseCsvText = (textValue: string): Record<string, string>[] => {
-  const rows = textValue.split(/\r?\n/).filter(Boolean);
-  if (!rows.length) return [];
-  const headers = rows[0].split(',').map((h) => h.trim());
-  return rows.slice(1).map((line) => {
-    const values = line.split(',');
-    const out: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      out[header] = (values[index] ?? '').trim();
-    });
-    return out;
-  });
-};
+const fields: Array<{ key: CsvField; en: string; ar: string; numeric?: boolean }> = [
+  { key: 'productName', en: 'Product Name', ar: 'اسم المنتج' },
+  { key: 'campaignName', en: 'Campaign Name', ar: 'اسم الحملة' },
+  { key: 'adSetName', en: 'Ad Set Name', ar: 'اسم مجموعة الإعلانات' },
+  { key: 'adName', en: 'Ad Name', ar: 'اسم الإعلان' },
+  { key: 'spend', en: 'Spend', ar: 'الإنفاق', numeric: true },
+  { key: 'impressions', en: 'Impressions', ar: 'مرات الظهور', numeric: true },
+  { key: 'linkClicks', en: 'Link Clicks', ar: 'نقرات الرابط', numeric: true },
+  { key: 'landingPageViews', en: 'Landing Page Views', ar: 'زيارات اللاند', numeric: true },
+  { key: 'purchases', en: 'Purchases', ar: 'المشتريات', numeric: true },
+  { key: 'costPerResult', en: 'Cost per Result', ar: 'تكلفة النتيجة', numeric: true },
+  { key: 'ctr', en: 'CTR', ar: 'CTR', numeric: true },
+  { key: 'cpc', en: 'CPC', ar: 'CPC', numeric: true },
+  { key: 'cpm', en: 'CPM', ar: 'CPM', numeric: true },
+  { key: 'videoPlays', en: 'Video Plays', ar: 'مشاهدات الفيديو', numeric: true },
+  { key: 'thruPlays', en: 'ThruPlays', ar: 'ThruPlays', numeric: true },
+  { key: 'contentViews', en: 'Content Views', ar: 'مشاهدات المحتوى', numeric: true },
+  { key: 'threeSecViews', en: '3-second Video Plays', ar: 'مشاهدات أول 3 ثواني', numeric: true },
+  { key: 'checkoutsInitiated', en: 'Checkouts Initiated', ar: 'بدء الدفع', numeric: true },
+  { key: 'uniqueOutboundClicks', en: 'Unique Outbound Clicks', ar: 'نقرات خارجية فريدة', numeric: true },
+  { key: 'landingPageUrl', en: 'Landing Page URL', ar: 'رابط اللاند' },
+  { key: 'productCost', en: 'Product Cost', ar: 'تكلفة المنتج', numeric: true },
+  { key: 'shippingCost', en: 'Shipping Cost', ar: 'تكلفة الشحن', numeric: true },
+  { key: 'operationsCost', en: 'Operations Cost', ar: 'تكلفة التشغيل', numeric: true }
+];
 
 const synonyms: Record<CsvField, string[]> = {
-  productName: ['product name', 'product', 'item name', 'sku name'],
+  productName: ['product name', 'product', 'item', 'sku'],
   campaignName: ['campaign name', 'campaign'],
-  adSetName: ['ad set name', 'adset name', 'ad set'],
-  creativeName: ['ad name', 'creative name', 'ad creative', 'ad'],
-  spend: ['amount spent', 'spend', 'amount spent egp', 'cost'],
+  adSetName: ['ad set name', 'ad set', 'adset'],
+  adName: ['ad name', 'ad', 'creative name', 'creative'],
+  spend: ['amount spent', 'spend', 'amount spent egp', 'amount spent usd'],
   impressions: ['impressions'],
-  linkClicks: ['link clicks', 'clicks link', 'outbound clicks', 'unique link clicks'],
+  linkClicks: ['link clicks', 'outbound clicks', 'clicks'],
   landingPageViews: ['landing page views', 'website landing page views', 'lpv'],
-  purchases: ['purchases', 'website purchases', 'results purchases', 'purchase'],
+  purchases: ['purchases', 'website purchases', 'purchase'],
   costPerResult: ['cost per result', 'cost per purchase'],
   checkoutsInitiated: ['checkouts initiated', 'initiated checkout'],
   threeSecViews: ['3-second video plays', '3 second video plays'],
   thruPlays: ['thruplays', 'thru plays'],
   uniqueOutboundClicks: ['unique outbound clicks'],
   contentViews: ['content views', 'view content'],
-  landingPageUrl: ['landing page url', 'website url'],
+  landingPageUrl: ['landing page url', 'destination url'],
   productCost: ['product cost'],
   shippingCost: ['shipping cost'],
-  operationsCost: ['operations cost']
+  operationsCost: ['operations cost'],
+  ctr: ['ctr', 'outbound ctr', 'link ctr'],
+  cpc: ['cpc', 'cost per click'],
+  cpm: ['cpm', 'cost per 1000'],
+  videoPlays: ['video plays', 'video play']
 };
 
-const isNumericField = (field: CsvField) => Boolean(FIELDS.find((f) => f.key === field)?.numeric);
+const normalize = (v: string) => v.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const clean = (v: string) => v.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+const toNumber = (v: unknown): number | undefined => {
+  if (v === undefined || v === null) return undefined;
+  const s = String(v).trim();
+  if (!s) return undefined;
+  const n = Number(s.replace(/[$,%\s]/g, '').replace(/,/g, ''));
+  return Number.isFinite(n) ? n : undefined;
+};
+
+const splitCsvLine = (line: string) => {
+  const out: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else inQuotes = !inQuotes;
+    } else if (ch === ',' && !inQuotes) {
+      out.push(current);
+      current = '';
+    } else current += ch;
+  }
+  out.push(current);
+  return out.map((x) => x.trim());
+};
+
+const parseCsvText = (raw: string): Record<string, string>[] => {
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim());
+  if (!lines.length) return [];
+  const headers = splitCsvLine(lines[0]);
+  return lines.slice(1).map((line) => {
+    const values = splitCsvLine(line);
+    const row: Record<string, string> = {};
+    headers.forEach((h, idx) => { row[h] = values[idx] ?? ''; });
+    return row;
+  });
+};
+
+const detectFileKind = (headers: string[]): FileKind => {
+  const normalized = headers.map((h) => normalize(h));
+  if (normalized.some((h) => h.includes('ad name') || h === 'ad')) return 'ad';
+  if (normalized.some((h) => h.includes('ad set'))) return 'adset';
+  return 'campaign';
+};
 
 const scoreColumn = (field: CsvField, header: string): MappingResult => {
-  const normalizedHeader = normalize(header);
-  const collapsed = clean(header);
-  const list = synonyms[field];
   let score = 0;
-  for (const term of list) {
-    const normalizedTerm = normalize(term);
-    if (normalizedHeader === normalizedTerm) score = Math.max(score, 1);
-    else if (normalizedHeader.includes(normalizedTerm)) score = Math.max(score, 0.75);
-    else if (collapsed.includes(clean(term))) score = Math.max(score, 0.6);
+  const nHeader = normalize(header);
+  for (const term of synonyms[field]) {
+    const nTerm = normalize(term);
+    if (nHeader === nTerm) score = Math.max(score, 1);
+    else if (nHeader.includes(nTerm)) score = Math.max(score, 0.8);
+    else if (clean(header).includes(clean(term))) score = Math.max(score, 0.6);
   }
+  if (field === 'purchases' && nHeader.includes('results') && !nHeader.includes('purchase')) score = Math.min(score, 0.4);
+  const isNumeric = Boolean(fields.find((f) => f.key === field)?.numeric);
+  if (isNumeric && /(name|campaign|ad set|creative|url)/i.test(header)) score = 0;
+  if (!isNumeric && /(spend|cost|amount|impressions|click|purchase|cpm|ctr|cpc)/i.test(header)) score = 0;
 
-  if (isNumericField(field) && /(name|campaign|ad set|creative|product)/i.test(header)) score = 0;
-  if (!isNumericField(field) && /(spend|cost|amount|impressions|click|purchase|result)/i.test(header) && !/(name|url)/i.test(header)) score = 0;
-
-  if (score >= 0.9) return { column: header, confidence: 'high', reason: 'Exact match' };
-  if (score >= 0.7) return { column: header, confidence: 'medium', reason: 'Close header match' };
-  if (score >= 0.55) return { column: header, confidence: 'low', reason: 'Weak match' };
+  if (score >= 0.9) return { column: header, confidence: 'high', reason: 'Exact/strong keyword match' };
+  if (score >= 0.7) return { column: header, confidence: 'medium', reason: 'Partial keyword match' };
+  if (score >= 0.55) return { column: header, confidence: 'low', reason: 'Weak keyword match' };
   return { confidence: 'low', reason: 'No reliable match' };
 };
 
 const autoMapColumns = (headers: string[]) => {
   const mapping: CsvMapping = {};
-  const confidenceMap: Partial<Record<CsvField, MappingResult>> = {};
-
+  const mappingSignals: Partial<Record<CsvField, MappingResult>> = {};
   (Object.keys(synonyms) as CsvField[]).forEach((field) => {
-    const scored = headers.map((h) => scoreColumn(field, h)).filter((r) => r.column);
-    const best = scored.sort((a, b) => {
-      const rank = { high: 3, medium: 2, low: 1 };
-      return rank[b.confidence] - rank[a.confidence];
-    })[0];
-    confidenceMap[field] = best ?? { confidence: 'low', reason: 'No reliable match' };
-    if (best && best.confidence === 'high' && best.column) mapping[field] = best.column;
+    const rank = { high: 3, medium: 2, low: 1 };
+    const best = headers
+      .map((h) => scoreColumn(field, h))
+      .filter((r) => r.column)
+      .sort((a, b) => rank[b.confidence] - rank[a.confidence])[0];
+    mappingSignals[field] = best ?? { confidence: 'low', reason: 'No reliable match' };
+    if (best?.column && best.confidence !== 'low') mapping[field] = best.column;
   });
-
-  return { mapping, confidenceMap };
+  return { mapping, mappingSignals };
 };
 
-const parseProductInfo = (campaignName: string) => {
-  const textValue = campaignName || 'Unknown Product';
-  const code = textValue.match(/([A-Z]{2,}\d{2,}|\d{3,})/)?.[1];
-  const product = textValue.split(/\||-|\//)[0]?.trim() || textValue;
+const inferProduct = (campaignName?: string) => {
+  const source = campaignName || 'Unknown Product';
+  const code = source.match(/([A-Za-z]{2,}\d{2,}|\d{3,})/)?.[1];
+  const parts = source.split(/\||-|\/|_/).map((p) => p.trim()).filter(Boolean);
+  const blocked = ['campaign', 'conversion', 'retarget', 'prospecting', 'sales', 'purchase'];
+  const product = parts.find((p) => !blocked.some((b) => p.toLowerCase().includes(b))) || parts[0] || source;
   return { product, code };
 };
 
-const SearchableSelect = ({ label, placeholder, options, value, onChange, disabled }: { label: string; placeholder: string; options: string[]; value: string; onChange: (v: string) => void; disabled?: boolean }) => {
-  const [query, setQuery] = useState('');
-  const filtered = useMemo(() => options.filter((o) => normalize(o).includes(normalize(query))), [options, query]);
+const normalizeRows = (rows: Record<string, string>[], mapping: CsvMapping): NormalizedRow[] => rows.map((row) => {
+  const campaignName = mapping.campaignName ? row[mapping.campaignName] : undefined;
+  const inferred = inferProduct(campaignName);
+  const num = (key: CsvField) => { const col = mapping[key]; return col ? toNumber(row[col]) : undefined; };
+  return {
+    campaignName,
+    adSetName: mapping.adSetName ? row[mapping.adSetName] : undefined,
+    adName: mapping.adName ? row[mapping.adName] : undefined,
+    productName: mapping.productName ? row[mapping.productName] : undefined,
+    inferredProduct: inferred.product,
+    inferredCode: inferred.code,
+    spend: num('spend'), impressions: num('impressions'), linkClicks: num('linkClicks'), landingPageViews: num('landingPageViews'), purchases: num('purchases'),
+    costPerResult: num('costPerResult'), checkoutsInitiated: num('checkoutsInitiated'), threeSecViews: num('threeSecViews'), thruPlays: num('thruPlays'), uniqueOutboundClicks: num('uniqueOutboundClicks'),
+    contentViews: num('contentViews'), ctr: num('ctr'), cpc: num('cpc'), cpm: num('cpm'), videoPlays: num('videoPlays'),
+    landingPageUrl: mapping.landingPageUrl ? row[mapping.landingPageUrl] : undefined
+  };
+});
 
-  return (
-    <div className="rounded bg-slate-800 p-2">
-      <label className="mb-1 block text-xs text-slate-300">{label}</label>
-      <input disabled={disabled} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={placeholder} className="mb-2 w-full rounded bg-slate-900 p-2 text-sm" />
-      <select disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded bg-slate-900 p-2 text-sm">
-        <option value="">{placeholder}</option>
-        {filtered.map((option) => <option key={option} value={option}>{option}</option>)}
-      </select>
-    </div>
-  );
+const SearchableSelect = ({ label, placeholder, options, value, disabled, onChange }: { label: string; placeholder: string; options: string[]; value: string; disabled?: boolean; onChange: (v: string) => void }) => {
+  const [q, setQ] = useState('');
+  const filtered = useMemo(() => options.filter((o) => normalize(o).includes(normalize(q))), [options, q]);
+  return <div className="rounded bg-slate-800 p-2"><label className="mb-1 block text-xs">{label}</label><input className="mb-2 w-full rounded bg-slate-900 p-2 text-sm" value={q} onChange={(e) => setQ(e.target.value)} placeholder={placeholder} disabled={disabled} /><select className="w-full rounded bg-slate-900 p-2 text-sm" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}><option value="">{placeholder}</option>{filtered.map((o) => <option key={o} value={o}>{o}</option>)}</select></div>;
 };
 
 export default function CopilotApp() {
   const [lang, setLang] = useState<Lang>('en');
-  const [inputMode, setInputMode] = useState<'csv' | 'manual'>('csv');
-  const [csvRows, setCsvRows] = useState<Record<string, string>[]>([]);
-  const [csvColumns, setCsvColumns] = useState<string[]>([]);
-  const [mapping, setMapping] = useState<CsvMapping>({});
-  const [mappingSignals, setMappingSignals] = useState<Partial<Record<CsvField, MappingResult>>>({});
-  const [manualValues, setManualValues] = useState<ManualValues>({});
-
+  const [campaignData, setCampaignData] = useState<Dataset | null>(null);
+  const [adData, setAdData] = useState<Dataset | null>(null);
   const [selectedProduct, setSelectedProduct] = useState('');
   const [selectedCampaign, setSelectedCampaign] = useState('');
   const [selectedAdSet, setSelectedAdSet] = useState('');
-  const [selectedCreative, setSelectedCreative] = useState('');
-
+  const [selectedAd, setSelectedAd] = useState('');
+  const [manualValues, setManualValues] = useState<Partial<Record<CsvField, string>>>({});
   const t = text[lang];
 
-  const grouped = useMemo(() => {
-    if (!csvRows.length) return [] as GroupedCampaignData[];
-    const campaignCol = mapping.campaignName;
-    const adSetCol = mapping.adSetName;
-    const creativeCol = mapping.creativeName;
-    const productCol = mapping.productName;
-
-    const bins = new Map<string, GroupedCampaignData>();
-    csvRows.forEach((row) => {
-      const campaign = campaignCol ? row[campaignCol] || 'Unknown Campaign' : 'Unknown Campaign';
-      const parsed = parseProductInfo(campaign);
-      const product = productCol ? row[productCol] || parsed.product : parsed.product;
-      const adSet = adSetCol ? row[adSetCol] || undefined : undefined;
-      const creative = creativeCol ? row[creativeCol] || undefined : undefined;
-      const key = `${product}|${campaign}|${adSet ?? ''}|${creative ?? ''}`;
-      const existing = bins.get(key);
-      if (existing) existing.rows.push(row);
-      else bins.set(key, { product, productCode: parsed.code, campaign, adSet, creative, rows: [row] });
-    });
-    return Array.from(bins.values());
-  }, [csvRows, mapping]);
-
-  const products = useMemo(() => Array.from(new Set(grouped.map((g) => `${g.productCode ? `[${g.productCode}] ` : ''}${g.product}`))), [grouped]);
-  const campaigns = useMemo(() => Array.from(new Set(grouped.filter((g) => `${g.productCode ? `[${g.productCode}] ` : ''}${g.product}` === selectedProduct).map((g) => g.campaign))), [grouped, selectedProduct]);
-  const adSets = useMemo(() => Array.from(new Set(grouped.filter((g) => `${g.productCode ? `[${g.productCode}] ` : ''}${g.product}` === selectedProduct && g.campaign === selectedCampaign).map((g) => g.adSet).filter(Boolean) as string[])), [grouped, selectedProduct, selectedCampaign]);
-  const creatives = useMemo(() => Array.from(new Set(grouped.filter((g) => `${g.productCode ? `[${g.productCode}] ` : ''}${g.product}` === selectedProduct && g.campaign === selectedCampaign && (!mapping.adSetName || g.adSet === selectedAdSet)).map((g) => g.creative).filter(Boolean) as string[])), [grouped, mapping.adSetName, selectedProduct, selectedCampaign, selectedAdSet]);
-
-  const selectedRows = useMemo(() => grouped.filter((g) => `${g.productCode ? `[${g.productCode}] ` : ''}${g.product}` === selectedProduct && g.campaign === selectedCampaign && (!mapping.adSetName || g.adSet === selectedAdSet) && (!mapping.creativeName || g.creative === selectedCreative)).flatMap((g) => g.rows), [grouped, mapping.adSetName, mapping.creativeName, selectedProduct, selectedCampaign, selectedAdSet, selectedCreative]);
-
-  const numericInput = useMemo(() => {
-    const read = (field: CsvField): number | undefined => {
-      const manual = toNum(manualValues[field]);
-      if (manual !== undefined) return manual;
-      const col = mapping[field];
-      if (!col || !selectedRows.length) return undefined;
-      let sum = 0;
-      let has = false;
-      selectedRows.forEach((row) => {
-        const value = toNum(row[col]);
-        if (value !== undefined) {
-          sum += value;
-          has = true;
-        }
-      });
-      return has ? sum : undefined;
-    };
-
-    return {
-      spend: read('spend'),
-      impressions: read('impressions'),
-      linkClicks: read('linkClicks'),
-      landingPageViews: read('landingPageViews'),
-      purchases: read('purchases'),
-      uniqueOutboundClicks: read('uniqueOutboundClicks'),
-      checkoutsInitiated: read('checkoutsInitiated'),
-      threeSecViews: read('threeSecViews'),
-      thruPlays: read('thruPlays')
-    };
-  }, [mapping, manualValues, selectedRows]);
-
-  const metrics = useMemo(() => buildMetrics(numericInput), [numericInput]);
-  const diagnosis = useMemo(() => buildDiagnosis(numericInput, metrics), [numericInput, metrics]);
-
-  const handleCsvUpload = async (file: File) => {
-    const textValue = await file.text();
-    const parsed = parseCsvText(textValue).filter((r) => Object.values(r).some((v) => v.trim()));
-    const headers = Object.keys(parsed[0] ?? {});
+  const onUpload = async (file: File, forcedType: 'campaign' | 'ad') => {
+    const rows = parseCsvText(await file.text());
+    const headers = Object.keys(rows[0] ?? {});
     const auto = autoMapColumns(headers);
-    setCsvRows(parsed);
-    setCsvColumns(headers);
-    setMapping(auto.mapping);
-    setMappingSignals(auto.confidenceMap);
-    setSelectedProduct('');
-    setSelectedCampaign('');
-    setSelectedAdSet('');
-    setSelectedCreative('');
+    const dataset: Dataset = { fileName: file.name, rows, headers, mapping: auto.mapping, mappingSignals: auto.mappingSignals, kind: detectFileKind(headers) };
+    if (forcedType === 'campaign') setCampaignData(dataset); else setAdData(dataset);
+    setSelectedProduct(''); setSelectedCampaign(''); setSelectedAdSet(''); setSelectedAd('');
   };
 
-  const ready = inputMode === 'manual' || (selectedRows.length > 0 && selectedProduct && selectedCampaign && (!mapping.adSetName || selectedAdSet) && (!mapping.creativeName || selectedCreative));
+  const campaignRows = useMemo(() => campaignData ? normalizeRows(campaignData.rows, campaignData.mapping) : [], [campaignData]);
+  const adRows = useMemo(() => adData ? normalizeRows(adData.rows, adData.mapping) : [], [adData]);
+  const baseRows = campaignRows.length ? campaignRows : adRows;
 
+  const productLabel = (r: NormalizedRow) => `${r.inferredCode ? `[${r.inferredCode}] ` : ''}${r.productName || r.inferredProduct || 'Unknown'}`;
+  const products = useMemo(() => Array.from(new Set(baseRows.map(productLabel))), [baseRows]);
+  const campaigns = useMemo(() => Array.from(new Set(baseRows.filter((r) => productLabel(r) === selectedProduct).map((r) => r.campaignName).filter(Boolean) as string[])), [baseRows, selectedProduct]);
+  const adSets = useMemo(() => Array.from(new Set(adRows.filter((r) => r.campaignName === selectedCampaign).map((r) => r.adSetName).filter(Boolean) as string[])), [adRows, selectedCampaign]);
+  const creatives = useMemo(() => Array.from(new Set(adRows.filter((r) => r.campaignName === selectedCampaign && (!selectedAdSet || r.adSetName === selectedAdSet)).map((r) => r.adName).filter((v): v is string => Boolean(v && /[A-Za-z\u0600-\u06FF]/.test(v) && toNumber(v) === undefined)))), [adRows, selectedCampaign, selectedAdSet]);
+
+  const selectedRows = useMemo(() => (campaignRows.length ? campaignRows : adRows).filter((r) => productLabel(r) === selectedProduct && r.campaignName === selectedCampaign && (!selectedAdSet || r.adSetName === selectedAdSet) && (!selectedAd || r.adName === selectedAd)), [campaignRows, adRows, selectedProduct, selectedCampaign, selectedAdSet, selectedAd]);
+
+  const sum = (rows: NormalizedRow[], key: keyof NormalizedRow): number | undefined => { let total = 0; let has = false; rows.forEach((r) => { const n = r[key]; if (typeof n === 'number' && Number.isFinite(n)) { total += n; has = true; } }); return has ? total : undefined; };
+
+  const numericInput = useMemo(() => {
+    const read = (key: keyof NormalizedRow, manual: CsvField) => toNumber(manualValues[manual]) ?? sum(selectedRows, key);
+    return { spend: read('spend', 'spend'), impressions: read('impressions', 'impressions'), linkClicks: read('linkClicks', 'linkClicks'), landingPageViews: read('landingPageViews', 'landingPageViews'), purchases: read('purchases', 'purchases'), uniqueOutboundClicks: read('uniqueOutboundClicks', 'uniqueOutboundClicks'), checkoutsInitiated: read('checkoutsInitiated', 'checkoutsInitiated'), threeSecViews: read('threeSecViews', 'threeSecViews'), thruPlays: read('thruPlays', 'thruPlays'), contentViews: read('contentViews', 'contentViews'), videoPlays: read('videoPlays', 'videoPlays') };
+  }, [manualValues, selectedRows]);
+
+  const metrics = useMemo(() => buildMetrics(numericInput), [numericInput]);
+  const diagnosis = useMemo(() => buildDiagnosis(numericInput, metrics, { hasAdLevelData: adRows.length > 0, hasPurchases: numericInput.purchases !== undefined }), [numericInput, metrics, adRows.length]);
+
+  const creativeMetrics = useMemo(() => {
+    const entries = creatives.map((name) => {
+      const rows = adRows.filter((r) => r.campaignName === selectedCampaign && (!selectedAdSet || r.adSetName === selectedAdSet) && r.adName === name);
+      const m = buildMetrics({ spend: sum(rows, 'spend'), impressions: sum(rows, 'impressions'), linkClicks: sum(rows, 'linkClicks'), landingPageViews: sum(rows, 'landingPageViews'), purchases: sum(rows, 'purchases'), thruPlays: sum(rows, 'thruPlays'), videoPlays: sum(rows, 'videoPlays'), threeSecViews: sum(rows, 'threeSecViews') });
+      return { name, m };
+    });
+    const score = (x: { m: ReturnType<typeof buildMetrics> }) => x.m.find((i) => i.key === 'landingCvr')?.value ?? -1;
+    return { entries, best: entries.slice().sort((a, b) => score(b) - score(a))[0], worst: entries.slice().sort((a, b) => score(a) - score(b))[0] };
+  }, [creatives, adRows, selectedCampaign, selectedAdSet]);
+
+  const statusBanner = (dataset: Dataset | null) => {
+    if (!dataset) return null;
+    const msg = dataset.kind === 'campaign'
+      ? 'This is a campaign-level file. Creative analysis is limited unless an ad-level file is also uploaded. / الملف ده على مستوى الكامبين — تحليل الكريتف محدود إلا لو تم رفع ملف على مستوى الإعلان'
+      : dataset.kind === 'ad'
+      ? 'This is an ad-level file. Creative analysis is available. / الملف ده على مستوى الإعلان — تحليل الكريتف متاح'
+      : 'This is an ad set-level file. Creative analysis needs ad names. / الملف ده على مستوى الـ Ad Set — تحليل الكريتف يحتاج أسماء إعلانات';
+    return <p className="mt-2 rounded bg-blue-950 p-2 text-xs text-blue-100">{msg}</p>;
+  };
+
+  const hasData = Boolean(campaignData || adData);
+  const ready = hasData && selectedProduct && selectedCampaign;
   const availableMetrics = metrics.filter((m) => m.value !== undefined);
   const missingMetrics = metrics.filter((m) => m.value === undefined);
 
-  return (
-    <main className="mx-auto min-h-screen max-w-6xl p-6" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">{t.title}</h1>
-        <div className="flex items-center gap-2 text-sm">
-          <span>{t.language}</span>
-          <button onClick={() => setLang('en')} className={`rounded px-3 py-1 ${lang === 'en' ? 'bg-blue-600' : 'bg-slate-700'}`}>EN</button>
-          <button onClick={() => setLang('ar')} className={`rounded px-3 py-1 ${lang === 'ar' ? 'bg-blue-600' : 'bg-slate-700'}`}>AR</button>
-        </div>
-      </div>
+  return <main className="mx-auto min-h-screen max-w-6xl p-6" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+    <div className="mb-4 flex items-center justify-between"><h1 className="text-2xl font-bold">{t.title}</h1><div className="flex gap-2"><button onClick={() => setLang('en')} className={`rounded px-3 py-1 ${lang === 'en' ? 'bg-blue-600' : 'bg-slate-700'}`}>EN</button><button onClick={() => setLang('ar')} className={`rounded px-3 py-1 ${lang === 'ar' ? 'bg-blue-600' : 'bg-slate-700'}`}>AR</button></div></div>
 
-      <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4">
-        <p className="mb-2 text-sm font-semibold">{t.mode}</p>
-        <div className="mb-3 flex gap-2">
-          <button onClick={() => setInputMode('csv')} className={`rounded px-3 py-1 ${inputMode === 'csv' ? 'bg-blue-600' : 'bg-slate-700'}`}>{t.csv}</button>
-          <button onClick={() => setInputMode('manual')} className={`rounded px-3 py-1 ${inputMode === 'manual' ? 'bg-blue-600' : 'bg-slate-700'}`}>{t.manual}</button>
-        </div>
+    <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4"><div className="grid gap-3 md:grid-cols-2"><div><label className="mb-1 block text-sm">{t.uploadCampaign}</label><input type="file" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) onUpload(f, 'campaign'); }} />{campaignData && <p className="mt-1 text-xs text-slate-300">{t.uploadedData}: {campaignData.fileName}</p>}{statusBanner(campaignData)}</div><div><label className="mb-1 block text-sm">{t.uploadAd}</label><input type="file" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) onUpload(f, 'ad'); }} />{adData && <p className="mt-1 text-xs text-slate-300">{t.uploadedData}: {adData.fileName}</p>}{statusBanner(adData)}</div></div>{!hasData && <p className="mt-3 text-sm text-slate-300">{t.onboarding}</p>}</section>
 
-        {inputMode === 'csv' && (
-          <input type="file" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleCsvUpload(f); }} />
-        )}
+    {[campaignData, adData].filter(Boolean).map((d, idx) => {
+      const dataset = d as Dataset;
+      return <section key={`${dataset.fileName}-${idx}`} className="mb-4 rounded border border-slate-700 bg-slate-900 p-4"><h2 className="mb-2 text-lg font-semibold">{t.mapping} — {dataset.fileName}</h2><div className="grid gap-2 md:grid-cols-2">{fields.map((field) => { const sig = dataset.mappingSignals[field.key]; return <label key={`${dataset.fileName}-${field.key}`} className="rounded bg-slate-800 p-2 text-sm"><div className="mb-1 flex justify-between"><span>{field.en} / {field.ar}</span><span className="text-xs text-amber-300">{t.confidence}: {t[sig?.confidence ?? 'low']}</span></div><select value={dataset.mapping[field.key] ?? ''} className="w-full rounded bg-slate-900 p-2" onChange={(e) => { const value = e.target.value || undefined; if (dataset === campaignData) setCampaignData({ ...dataset, mapping: { ...dataset.mapping, [field.key]: value } }); if (dataset === adData) setAdData({ ...dataset, mapping: { ...dataset.mapping, [field.key]: value } }); }}><option value="">Not mapped / غير مربوط</option>{dataset.headers.map((h) => <option key={`${field.key}-${h}`} value={h}>{h}</option>)}</select></label>; })}</div></section>;
+    })}
 
-        {!csvRows.length && inputMode === 'csv' && <p className="mt-2 text-sm text-slate-300">{t.empty}</p>}
-      </section>
+    {hasData && <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4"><h2 className="mb-2 text-lg font-semibold">{t.select}</h2><div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4"><SearchableSelect label={t.product} placeholder={t.search} options={products} value={selectedProduct} onChange={(v) => { setSelectedProduct(v); setSelectedCampaign(''); setSelectedAdSet(''); setSelectedAd(''); }} /><SearchableSelect label={t.campaign} placeholder={t.search} options={campaigns} value={selectedCampaign} onChange={(v) => { setSelectedCampaign(v); setSelectedAdSet(''); setSelectedAd(''); }} disabled={!selectedProduct} />{adSets.length ? <SearchableSelect label={t.adset} placeholder={t.search} options={adSets} value={selectedAdSet} onChange={(v) => { setSelectedAdSet(v); setSelectedAd(''); }} disabled={!selectedCampaign} /> : <p className="rounded bg-slate-800 p-2 text-sm text-amber-200">{t.adsetMissing}</p>}{creatives.length ? <SearchableSelect label={t.creative} placeholder={t.search} options={creatives} value={selectedAd} onChange={setSelectedAd} disabled={!selectedCampaign} /> : <p className="rounded bg-slate-800 p-2 text-sm text-amber-200">{t.creativeMissing}</p>}</div></section>}
 
-      {!!csvRows.length && inputMode === 'csv' && (
-        <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4">
-          <h2 className="mb-2 text-lg font-semibold">{t.map}</h2>
-          <div className="grid gap-2 md:grid-cols-2">
-            {FIELDS.map((field) => {
-              const sig = mappingSignals[field.key];
-              const cLabel = sig?.confidence ? t[sig.confidence as keyof typeof t] : t.low;
-              return (
-                <label key={field.key} className="rounded bg-slate-800 p-2 text-sm">
-                  <div className="mb-1 flex justify-between">
-                    <span>{field.en} / {field.ar}</span>
-                    <span className="text-xs text-amber-300">{t.confidence}: {cLabel}</span>
-                  </div>
-                  <select value={mapping[field.key] ?? ''} onChange={(e) => setMapping((prev) => ({ ...prev, [field.key]: e.target.value || undefined }))} className="w-full rounded bg-slate-900 p-2">
-                    <option value="">Not mapped / غير مربوط</option>
-                    {csvColumns.map((col) => <option key={`${field.key}-${col}`} value={col}>{col}</option>)}
-                  </select>
-                </label>
-              );
-            })}
-          </div>
-        </section>
-      )}
+    <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4"><h2 className="mb-2 text-lg font-semibold">{t.manual}</h2><div className="grid gap-2 md:grid-cols-3">{['purchases', 'checkoutsInitiated', 'uniqueOutboundClicks', 'threeSecViews', 'thruPlays', 'landingPageUrl', 'productCost', 'shippingCost', 'operationsCost'].map((k) => fields.find((f) => f.key === k as CsvField)!).map((f) => <label key={f.key} className="text-sm"><span className="mb-1 block">{f.en} / {f.ar}</span><input className="w-full rounded bg-slate-800 p-2" value={manualValues[f.key] ?? ''} onChange={(e) => setManualValues((prev) => ({ ...prev, [f.key]: e.target.value }))} /></label>)}</div></section>
 
-      {!!csvRows.length && inputMode === 'csv' && (
-        <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4">
-          <h2 className="mb-2 text-lg font-semibold">{t.select}</h2>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-            <SearchableSelect label={`${t.product}`} placeholder={t.search} options={products} value={selectedProduct} onChange={(v) => { setSelectedProduct(v); setSelectedCampaign(''); setSelectedAdSet(''); setSelectedCreative(''); }} />
-            <SearchableSelect label={`${t.campaign}`} placeholder={t.search} options={campaigns} value={selectedCampaign} onChange={(v) => { setSelectedCampaign(v); setSelectedAdSet(''); setSelectedCreative(''); }} disabled={!selectedProduct} />
-            {mapping.adSetName ? <SearchableSelect label={`${t.adset}`} placeholder={t.search} options={adSets} value={selectedAdSet} onChange={(v) => { setSelectedAdSet(v); setSelectedCreative(''); }} disabled={!selectedCampaign} /> : <p className="rounded bg-slate-800 p-3 text-sm text-amber-200">{t.adsetMissing}</p>}
-            {mapping.creativeName ? <SearchableSelect label={`${t.creative}`} placeholder={t.search} options={creatives} value={selectedCreative} onChange={setSelectedCreative} disabled={!selectedCampaign || (Boolean(mapping.adSetName) && !selectedAdSet)} /> : <p className="rounded bg-slate-800 p-3 text-sm text-amber-200">{t.creativeMissing}</p>}
-          </div>
-        </section>
-      )}
-
-      <section className="mb-4 rounded border border-slate-700 bg-slate-900 p-4">
-        <h2 className="mb-2 text-lg font-semibold">{t.manual}</h2>
-        <div className="grid gap-2 md:grid-cols-3">
-          {FIELDS.filter((f) => ['purchases', 'checkoutsInitiated', 'threeSecViews', 'thruPlays', 'uniqueOutboundClicks', 'contentViews', 'landingPageUrl', 'productCost', 'shippingCost', 'operationsCost'].includes(f.key)).map((field) => (
-            <label key={`manual-${field.key}`} className="text-sm">
-              <span className="mb-1 block">{field.en} / {field.ar}</span>
-              <input value={manualValues[field.key] ?? ''} onChange={(e) => setManualValues((prev) => ({ ...prev, [field.key]: e.target.value }))} className="w-full rounded bg-slate-800 p-2" />
-            </label>
-          ))}
-        </div>
-      </section>
-
-      {ready && (
-        <section className="space-y-4">
-          <div className="rounded border border-slate-700 bg-slate-900 p-4">
-            <h2 className="mb-3 text-lg font-semibold">{t.available}</h2>
-            <div className="grid gap-2 md:grid-cols-2">
-              {availableMetrics.map((metric) => (
-                <div key={metric.key} className="rounded bg-slate-800 p-3 text-sm">
-                  <p className="font-semibold">{metric.labelEn} — {metric.labelAr}</p>
-                  <p className="text-xs text-slate-300">{metric.formula}</p>
-                  <p className="mt-1 text-lg">{metric.percentage ? `${((metric.value ?? 0) * 100).toFixed(2)}%` : (metric.value ?? 0).toFixed(2)}</p>
-                  <p className="text-xs text-slate-300">{metric.tooltipAr}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded border border-slate-700 bg-slate-900 p-4">
-            <h2 className="mb-3 text-lg font-semibold">{t.missingInputs}</h2>
-            <ul className="list-disc space-y-1 pl-5 text-sm text-amber-200">
-              {missingMetrics.map((metric) => (
-                <li key={`missing-${metric.key}`}>
-                  {metric.labelEn}: {t.unavailable} — {t.missingFields}: {metric.missingFields.join(', ')}
-                </li>
-              ))}
-              {!mapping.threeSecViews && <li>Hook Rate unavailable: missing 3-second video plays / Hook Rate غير متاح: ينقص مشاهدات 3 ثواني</li>}
-              {!mapping.thruPlays && <li>Hold Rate unavailable: missing ThruPlays / Hold Rate غير متاح: ينقص ThruPlays</li>}
-              {!mapping.checkoutsInitiated && <li>Checkout analysis unavailable: missing checkouts initiated / تحليل الـ Checkout غير متاح: ينقص بدء الدفع</li>}
-              {!mapping.creativeName && <li>Creative analysis unavailable: missing ad name / creative-level data / تحليل الكريتف غير متاح: ينقص اسم الإعلان</li>}
-            </ul>
-          </div>
-
-          <div className="rounded border border-slate-700 bg-slate-900 p-4 text-sm">
-            <h2 className="mb-2 text-lg font-semibold">{t.mainDiagnosis}</h2>
-            <p>{diagnosis.mainDiagnosisEn}</p>
-            <p className="text-slate-300">{diagnosis.mainDiagnosisAr}</p>
-            <h3 className="mt-3 font-semibold">{t.secondaryDiagnosis}</h3>
-            <p>{diagnosis.secondaryDiagnosisEn}</p>
-            <p className="text-slate-300">{diagnosis.secondaryDiagnosisAr}</p>
-            <p className="mt-2"><strong>{t.confidence}:</strong> {diagnosis.confidence}</p>
-            <h3 className="mt-3 font-semibold">{t.whatNext}</h3>
-            <ul className="list-disc pl-5">
-              {(lang === 'ar' ? diagnosis.nextActionsAr : diagnosis.nextActionsEn).map((action) => <li key={action}>{action}</li>)}
-            </ul>
-          </div>
-
-          <div className="rounded border border-slate-700 bg-slate-900 p-4 text-sm">
-            <h2 className="mb-2 text-lg font-semibold">{t.understanding}</h2>
-            <p>{lang === 'ar' ? 'مرّر على كل مؤشر واقرأ الشرح العربي لفهم معنى الرقم وتأثيره.' : 'Each metric includes formula + Arabic tooltip so beginners understand why it matters.'}</p>
-          </div>
-        </section>
-      )}
-    </main>
-  );
+    {ready && <section className="space-y-4"><div className="rounded border border-slate-700 bg-slate-900 p-4"><h3 className="mb-2 text-lg font-semibold">{t.available}</h3><div className="grid gap-2 md:grid-cols-2">{availableMetrics.map((m) => <div key={m.key} className="rounded bg-slate-800 p-2"><p className="font-semibold">{m.labelEn} — {m.labelAr}</p><p className="text-xs text-slate-300">{m.formula}</p><p className="text-lg">{m.percentage ? `${((m.value ?? 0) * 100).toFixed(2)}%` : (m.value ?? 0).toFixed(2)}</p><p className="text-xs text-slate-300">{m.tooltipAr}</p></div>)}</div></div>
+      <div className="rounded border border-slate-700 bg-slate-900 p-4"><h3 className="mb-2 text-lg font-semibold">{t.missing}</h3><ul className="list-disc space-y-1 ps-5 text-sm text-amber-200">{missingMetrics.map((m) => <li key={m.key}>{m.labelEn}: {t.unavailable}</li>)}{numericInput.threeSecViews === undefined && <li>Hook Rate unavailable — missing 3-second video plays / الهُوك ريت غير متاح — بيانات أول 3 ثواني غير موجودة</li>}</ul><h4 className="mt-3 font-semibold">{t.unlock}</h4><ul className="list-disc space-y-1 ps-5 text-sm"><li>Add purchases to unlock Landing CVR and CPA / أضف المشتريات لفتح Landing CVR وCPA</li><li>Add 3-second video plays to unlock Hook Rate / أضف مشاهدات أول 3 ثواني لفتح Hook Rate</li><li>Add ThruPlays to unlock Hold Rate / أضف ThruPlays لفتح Hold Rate</li><li>Add landing page URL to unlock landing audit / أضف رابط اللاند لفتح مراجعة اللاند</li>{!adRows.length && <li>Upload ad-level file to unlock creative analysis / ارفع ملف مستوى الإعلان لفتح تحليل الكريتف</li>}</ul></div>
+      <div className="rounded border border-slate-700 bg-slate-900 p-4"><h3 className="mb-2 text-lg font-semibold">{t.diagnosis}</h3><div className="space-y-3 text-sm">{diagnosis.issues.map((i) => <div key={i.titleEn} className="rounded bg-slate-800 p-3"><p className="font-semibold">{lang === 'ar' ? i.titleAr : i.titleEn}</p><p><strong>{lang === 'ar' ? 'الاختناق الأساسي' : 'Primary bottleneck'}:</strong> {lang === 'ar' ? i.primaryBottleneckAr : i.primaryBottleneckEn}</p><p><strong>{lang === 'ar' ? 'مشكلة ثانوية' : 'Secondary issue'}:</strong> {lang === 'ar' ? i.secondaryIssueAr : i.secondaryIssueEn}</p><p><strong>{lang === 'ar' ? 'الدليل' : 'Evidence'}:</strong> {lang === 'ar' ? i.evidenceAr : i.evidenceEn}</p><p><strong>{lang === 'ar' ? 'الثقة' : 'Confidence'}:</strong> {i.confidence}</p><p><strong>{lang === 'ar' ? 'الأسباب المحتملة' : 'Likely causes'}:</strong> {(lang === 'ar' ? i.likelyCausesAr : i.likelyCausesEn).join('، ')}</p><p><strong>{lang === 'ar' ? 'الإجراء التالي' : 'Next action'}:</strong> {lang === 'ar' ? i.nextActionAr : i.nextActionEn}</p></div>)}</div></div>
+      <div className="rounded border border-slate-700 bg-slate-900 p-4"><h3 className="mb-2 text-lg font-semibold">{t.creativeBreakdown}</h3>{!adRows.length && <p className="text-sm text-amber-200">{t.noCreative}</p>}{Boolean(adRows.length) && <><p className="mb-2 text-sm">Best performing creative: {creativeMetrics.best?.name || 'N/A'} | Worst performing creative: {creativeMetrics.worst?.name || 'N/A'}</p><ul className="list-disc space-y-1 ps-5 text-sm">{creativeMetrics.entries.map(({ name, m }) => { const ctr = m.find((x) => x.key === 'ctr')?.value; const cpa = m.find((x) => x.key === 'cpa')?.value; const hold = m.find((x) => x.key === 'holdRate')?.value; return <li key={name}>{name}: CTR {ctr !== undefined ? `${(ctr * 100).toFixed(2)}%` : 'N/A'} | CPA {cpa !== undefined ? cpa.toFixed(2) : 'N/A'} | Hold {hold !== undefined ? `${(hold * 100).toFixed(2)}%` : 'N/A'}</li>; })}</ul></>}</div>
+    </section>}
+  </main>;
 }

@@ -1,5 +1,6 @@
 export type DataMode = 'demo' | 'uploaded';
 
+
 export type AdMetrics = {
   spend: number;
   purchases: number;
@@ -12,7 +13,7 @@ export type CsvField =
   | 'productName'
   | 'campaignName'
   | 'adSetName'
-  | 'creativeName'
+  | 'adName'
   | 'spend'
   | 'impressions'
   | 'linkClicks'
@@ -27,7 +28,11 @@ export type CsvField =
   | 'landingPageUrl'
   | 'productCost'
   | 'shippingCost'
-  | 'operationsCost';
+  | 'operationsCost'
+  | 'ctr'
+  | 'cpc'
+  | 'cpm'
+  | 'videoPlays';
 
 export type CsvMapping = Partial<Record<CsvField, string>>;
 
@@ -50,21 +55,61 @@ export type MetricDefinition = {
   missingFields: string[];
 };
 
-export type DiagnosisOutput = {
-  mainDiagnosisEn: string;
-  mainDiagnosisAr: string;
-  secondaryDiagnosisEn: string;
-  secondaryDiagnosisAr: string;
+export type DiagnosisIssue = {
+  titleEn: string;
+  titleAr: string;
+  primaryBottleneckEn: string;
+  primaryBottleneckAr: string;
+  secondaryIssueEn: string;
+  secondaryIssueAr: string;
+  evidenceEn: string;
+  evidenceAr: string;
   confidence: 'High' | 'Medium' | 'Low';
-  nextActionsEn: string[];
-  nextActionsAr: string[];
+  likelyCausesEn: string[];
+  likelyCausesAr: string[];
+  nextActionEn: string;
+  nextActionAr: string;
 };
 
-export type GroupedCampaignData = {
-  product: string;
-  productCode?: string;
-  campaign: string;
-  adSet?: string;
-  creative?: string;
-  rows: Record<string, string>[];
+export type DiagnosisOutput = {
+  issues: DiagnosisIssue[];
+};
+
+export type NumericInput = {
+  spend?: number;
+  impressions?: number;
+  linkClicks?: number;
+  landingPageViews?: number;
+  purchases?: number;
+  uniqueOutboundClicks?: number;
+  checkoutsInitiated?: number;
+  threeSecViews?: number;
+  thruPlays?: number;
+  contentViews?: number;
+  videoPlays?: number;
+};
+
+export type NormalizedRow = {
+  campaignName?: string;
+  adSetName?: string;
+  adName?: string;
+  productName?: string;
+  inferredProduct?: string;
+  inferredCode?: string;
+  spend?: number;
+  impressions?: number;
+  linkClicks?: number;
+  landingPageViews?: number;
+  purchases?: number;
+  costPerResult?: number;
+  checkoutsInitiated?: number;
+  threeSecViews?: number;
+  thruPlays?: number;
+  uniqueOutboundClicks?: number;
+  contentViews?: number;
+  ctr?: number;
+  cpc?: number;
+  cpm?: number;
+  videoPlays?: number;
+  landingPageUrl?: string;
 };
