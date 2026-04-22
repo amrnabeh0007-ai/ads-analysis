@@ -1,136 +1,124 @@
-import { CsvMapping, DiagnosisOutput, FinalDecision, FunnelMetrics, MissingMetric } from '@/lib/types';
+import { DiagnosisOutput, MetricDefinition } from '@/lib/types';
 
-const ratio = (num: number, den: number) => (den > 0 ? num / den : undefined);
+type NumericInput = Record<string, number | undefined>;
 
-const hasColumn = (mapping: CsvMapping, key: keyof CsvMapping) => Boolean(mapping[key]);
-
-export const detectMissingMetrics = (mapping: CsvMapping): MissingMetric[] => {
-  const missing: MissingMetric[] = [];
-
-  if (!hasColumn(mapping, 'purchases') || !hasColumn(mapping, 'linkClicks')) {
-    missing.push({
-      key: 'purchasePerLinkClick',
-      label: 'Purchases ÷ Link clicks',
-      missingFields: [!hasColumn(mapping, 'purchases') ? 'purchases' : '', !hasColumn(mapping, 'linkClicks') ? 'linkClicks' : ''].filter(Boolean)
-    });
-  }
-
-  if (!hasColumn(mapping, 'purchases') || !hasColumn(mapping, 'landingPageViews')) {
-    missing.push({
-      key: 'purchasePerLandingPageView',
-      label: 'Purchases ÷ Landing page views',
-      missingFields: [!hasColumn(mapping, 'purchases') ? 'purchases' : '', !hasColumn(mapping, 'landingPageViews') ? 'landingPageViews' : ''].filter(Boolean)
-    });
-  }
-
-  if (!hasColumn(mapping, 'landingPageViews') || !hasColumn(mapping, 'linkClicks')) {
-    missing.push({
-      key: 'landingPageViewRate',
-      label: 'Landing page view rate',
-      missingFields: [!hasColumn(mapping, 'landingPageViews') ? 'landingPageViews' : '', !hasColumn(mapping, 'linkClicks') ? 'linkClicks' : ''].filter(Boolean)
-    });
-  }
-
-  if (!hasColumn(mapping, 'costPerResult') && !(hasColumn(mapping, 'spend') && hasColumn(mapping, 'purchases'))) {
-    missing.push({
-      key: 'costPerResult',
-      label: 'Cost per result',
-      missingFields: ['costPerResult or (spend + purchases)']
-    });
-  }
-
-  return missing;
+const safeDiv = (num?: number, den?: number) => {
+  if (num === undefined || den === undefined || den <= 0) return undefined;
+  const v = num / den;
+  return Number.isFinite(v) ? v : undefined;
 };
 
-export const calculateFunnelMetrics = (input: { purchases: number; linkClicks: number; landingPageViews: number; costPerResult: number }): FunnelMetrics => ({
-  purchasePerLinkClick: ratio(input.purchases, input.linkClicks),
-  purchasePerLandingPageView: ratio(input.purchases, input.landingPageViews),
-  landingPageViewRate: ratio(input.landingPageViews, input.linkClicks),
-  costPerResult: input.costPerResult > 0 ? input.costPerResult : undefined
+const withMetric = (
+  key: string,
+  labelEn: string,
+  labelAr: string,
+  formula: string,
+  tooltipAr: string,
+  value: number | undefined,
+  missingFields: string[],
+  percentage = true
+): MetricDefinition => ({
+  key,
+  labelEn,
+  labelAr,
+  formula,
+  tooltipAr,
+  value,
+  percentage,
+  missingFields
 });
 
-const pct = (value?: number) => (value === undefined ? 'n/a' : `${(value * 100).toFixed(2)}%`);
+const missing = (input: NumericInput, keys: string[]) => keys.filter((k) => input[k] === undefined);
 
-export const runDiagnosisEngine = (metrics: FunnelMetrics, missingCount: number): DiagnosisOutput => {
-  const reasoning: string[] = [];
-  const candidates: { id: string; score: number; reason: string; fix: string }[] = [];
+export const buildMetrics = (input: NumericInput): MetricDefinition[] => {
+  const ctrMissing = missing(input, ['linkClicks', 'impressions']);
+  const cpcMissing = missing(input, ['spend', 'linkClicks']);
+  const cpmMissing = missing(input, ['spend', 'impressions']);
+  const lpvRateMissing = missing(input, ['landingPageViews', 'linkClicks']);
+  const pplcMissing = missing(input, ['purchases', 'linkClicks']);
+  const landingCvrMissing = missing(input, ['purchases', 'landingPageViews']);
+  const ppuocMissing = missing(input, ['purchases', 'uniqueOutboundClicks']);
+  const checkoutRateMissing = missing(input, ['checkoutsInitiated', 'landingPageViews']);
+  const costPerLpvMissing = missing(input, ['spend', 'landingPageViews']);
+  const cpaMissing = missing(input, ['spend', 'purchases']);
+  const hookMissing = missing(input, ['threeSecViews', 'impressions']);
+  const holdMissing = missing(input, ['thruPlays', 'impressions']);
 
-  if (metrics.purchasePerLandingPageView !== undefined) {
-    const score = Math.max(0, 0.03 - metrics.purchasePerLandingPageView);
-    candidates.push({
-      id: 'landing-conversion',
-      score,
-      reason: `Purchases ÷ LPV is ${pct(metrics.purchasePerLandingPageView)}.`,
-      fix: 'Improve landing page trust, offer clarity, and checkout reassurance.'
-    });
-  }
-
-  if (metrics.landingPageViewRate !== undefined) {
-    const score = Math.max(0, 0.65 - metrics.landingPageViewRate);
-    candidates.push({
-      id: 'post-click-drop',
-      score,
-      reason: `LPV rate is ${pct(metrics.landingPageViewRate)} which indicates post-click drop-off.`,
-      fix: 'Improve page speed, reduce redirects, and validate URL/deep-link setup.'
-    });
-  }
-
-  if (metrics.purchasePerLinkClick !== undefined) {
-    const score = Math.max(0, 0.02 - metrics.purchasePerLinkClick);
-    candidates.push({
-      id: 'click-quality-or-offer',
-      score,
-      reason: `Purchases ÷ link clicks is ${pct(metrics.purchasePerLinkClick)}.`,
-      fix: 'Tighten audience/ad message match and align ad promise with landing offer.'
-    });
-  }
-
-  if (metrics.costPerResult !== undefined) {
-    const score = metrics.costPerResult > 80 ? Math.min(1, (metrics.costPerResult - 80) / 80) : 0;
-    candidates.push({
-      id: 'cost-efficiency',
-      score,
-      reason: `Cost per result is ${metrics.costPerResult.toFixed(2)}.`,
-      fix: 'Pause expensive creatives and reallocate to better converting segments.'
-    });
-  }
-
-  const sorted = candidates.sort((a, b) => b.score - a.score);
-  const main = sorted[0];
-  const secondary = sorted[1];
-
-  if (main) reasoning.push(main.reason);
-  if (secondary) reasoning.push(secondary.reason);
-  if (!main) reasoning.push('Not enough data to identify a bottleneck.');
-
-  const confidenceBase = Math.max(0.2, 1 - missingCount * 0.2);
-  const confidence = Math.min(0.97, Number((main ? confidenceBase : 0.25).toFixed(2)));
-
-  return {
-    mainProblem: main ? main.id : 'insufficient-data',
-    secondaryProblem: secondary ? secondary.id : 'none',
-    confidence,
-    reasoning,
-    fixes: [main?.fix, secondary?.fix].filter(Boolean) as string[]
-  };
+  return [
+    withMetric('ctr', 'CTR', 'نسبة الضغط على الإعلان', 'Link Clicks / Impressions', 'بتقيس قوة الكريتف والرسالة الإعلانية.', safeDiv(input.linkClicks, input.impressions), ctrMissing),
+    withMetric('cpc', 'CPC', 'تكلفة النقرة', 'Spend / Link Clicks', 'تكلفة كل ضغطة على الإعلان.', safeDiv(input.spend, input.linkClicks), cpcMissing, false),
+    withMetric('cpm', 'CPM', 'تكلفة الألف ظهور', '(Spend / Impressions) × 1000', 'تكلفة وصول الإعلان لكل 1000 ظهور.', safeDiv(input.spend, input.impressions) !== undefined ? (safeDiv(input.spend, input.impressions) as number) * 1000 : undefined, cpmMissing, false),
+    withMetric('lpvRate', 'Landing Page View Rate', 'نسبة دخول اللاند', 'Landing Page Views / Link Clicks', 'لو قليلة غالبًا فيه بطء تحميل أو مشكلة انتقال.', safeDiv(input.landingPageViews, input.linkClicks), lpvRateMissing),
+    withMetric('purchasesPerClick', 'Purchases per Link Click', 'مشتريات لكل نقرة', 'Purchases / Link Clicks', 'مؤشر أولي على جودة الفانل بعد النقر.', safeDiv(input.purchases, input.linkClicks), pplcMissing),
+    withMetric('landingCvr', 'Landing CVR', 'معدل التحويل من اللاند', 'Purchases / Landing Page Views', 'أهم مؤشر لقوة اللاند + العرض.', safeDiv(input.purchases, input.landingPageViews), landingCvrMissing),
+    withMetric('purchasesPerOutbound', 'Purchases per Unique Outbound Click', 'مشتريات لكل Outbound', 'Purchases / Unique Outbound Clicks', 'مفيد لو عمود outbound متاح.', safeDiv(input.purchases, input.uniqueOutboundClicks), ppuocMissing),
+    withMetric('checkoutRate', 'LP-to-Checkout Rate', 'معدل بدء الدفع من اللاند', 'Checkouts Initiated / Landing Page Views', 'لو قليل = عرض غير مقنع أو ثقة ضعيفة.', safeDiv(input.checkoutsInitiated, input.landingPageViews), checkoutRateMissing),
+    withMetric('costPerLpv', 'Cost per LPV', 'تكلفة دخول اللاند', 'Spend / Landing Page Views', 'تكلفة وصول زائر واحد لصفحة الهبوط.', safeDiv(input.spend, input.landingPageViews), costPerLpvMissing, false),
+    withMetric('cpa', 'Cost per Purchase (CPA)', 'تكلفة الشراء', 'Spend / Purchases', 'أهم رقم للحكم على الربحية.', safeDiv(input.spend, input.purchases), cpaMissing, false),
+    withMetric('hookRate', 'Hook Rate', 'معدل الهوك', '3-sec video plays / Impressions', 'قدرة أول 3 ثواني على إيقاف التمرير.', safeDiv(input.threeSecViews, input.impressions), hookMissing),
+    withMetric('holdRate', 'Hold Rate', 'معدل الاستمرار', 'ThruPlays / Impressions', 'نسبة من كملوا الفيديو.', safeDiv(input.thruPlays, input.impressions), holdMissing)
+  ];
 };
 
-export const runDecisionEngine = (metrics: FunnelMetrics, diagnosis: DiagnosisOutput): FinalDecision => {
-  const lpvToPurchase = metrics.purchasePerLandingPageView ?? 0;
-  const clickToPurchase = metrics.purchasePerLinkClick ?? 0;
-  const lpvRate = metrics.landingPageViewRate ?? 0;
+export const buildDiagnosis = (input: NumericInput, metrics: MetricDefinition[]): DiagnosisOutput => {
+  const ctr = metrics.find((m) => m.key === 'ctr')?.value;
+  const lpvRate = metrics.find((m) => m.key === 'lpvRate')?.value;
+  const landingCvr = metrics.find((m) => m.key === 'landingCvr')?.value;
+  const checkoutRate = metrics.find((m) => m.key === 'checkoutRate')?.value;
 
-  let decision: FinalDecision['decision'] = 'hold';
-  if (lpvToPurchase >= 0.03 && lpvRate >= 0.7) decision = 'scale';
-  if (lpvToPurchase < 0.01 || clickToPurchase < 0.005) decision = 'kill';
+  let mainEn = 'Insufficient data for a high-confidence diagnosis.';
+  let mainAr = 'البيانات غير كافية لتشخيص عالي الثقة.';
+  let secondaryEn = 'Upload more columns or enter missing values manually.';
+  let secondaryAr = 'ارفع أعمدة إضافية أو أدخل القيم الناقصة يدويًا.';
+  let confidence: DiagnosisOutput['confidence'] = 'Low';
+
+  if (ctr !== undefined && ctr < 0.01) {
+    mainEn = 'Low CTR: likely creative/copy/angle issue.';
+    mainAr = 'CTR منخفض: غالبًا مشكلة في الكريتف أو الرسالة.';
+    secondaryEn = 'Test new hooks, stronger offer framing, and clearer CTA.';
+    secondaryAr = 'اختبر هوكات جديدة وصياغة عرض أوضح وCTA أقوى.';
+    confidence = 'High';
+  }
+
+  if (ctr !== undefined && ctr >= 0.01 && lpvRate !== undefined && lpvRate < 0.6) {
+    mainEn = 'Good CTR + low LPV rate: likely landing speed/loading friction.';
+    mainAr = 'CTR جيد مع LPV منخفض: غالبًا بطء تحميل أو احتكاك تقني.';
+    secondaryEn = 'Audit mobile load speed, redirects, and broken destination URLs.';
+    secondaryAr = 'راجع سرعة الموبايل والتحويلات والروابط النهائية.';
+    confidence = 'High';
+  }
+
+  if (lpvRate !== undefined && lpvRate >= 0.6 && landingCvr !== undefined && landingCvr < 0.015) {
+    mainEn = 'Traffic reaches landing page but conversion is weak.';
+    mainAr = 'الزيارات تصل للاند لكن التحويل ضعيف.';
+    secondaryEn = 'Likely offer/price/trust issues on landing page.';
+    secondaryAr = 'غالبًا مشكلة عرض أو سعر أو ثقة في اللاند.';
+    confidence = 'High';
+  }
+
+  if (checkoutRate !== undefined && checkoutRate >= 0.1 && input.purchases !== undefined && input.purchases === 0) {
+    mainEn = 'Checkout started but purchases are zero: checkout/payment friction.';
+    mainAr = 'فيه بدء دفع لكن بدون مشتريات: مشكلة دفع/ثقة/شحن.';
+    secondaryEn = 'Review payment methods, shipping surprises, and trust signals.';
+    secondaryAr = 'راجع طرق الدفع ومفاجآت الشحن وعناصر الثقة.';
+    confidence = 'Medium';
+  }
 
   return {
-    decision,
-    mainBottleneck: diagnosis.mainProblem,
-    nextActions: [
-      diagnosis.fixes[0] ?? 'Complete missing columns and rerun analysis.',
-      'Validate tracking consistency for clicks, LPV, and purchases over the same date range.',
-      'Test one change at a time and re-evaluate after statistically meaningful spend.'
+    mainDiagnosisEn: mainEn,
+    mainDiagnosisAr: mainAr,
+    secondaryDiagnosisEn: secondaryEn,
+    secondaryDiagnosisAr: secondaryAr,
+    confidence,
+    nextActionsEn: [
+      'Fix the primary bottleneck first and rerun the same date range.',
+      'Do not optimize on unavailable metrics; complete missing fields.',
+      'Change one variable at a time to keep diagnosis reliable.'
+    ],
+    nextActionsAr: [
+      'ابدأ بإصلاح الاختناق الأساسي ثم أعد التحليل لنفس الفترة.',
+      'لا تُحسّن على مؤشرات غير متاحة؛ أكمل البيانات الناقصة.',
+      'غيّر عنصرًا واحدًا كل مرة للحفاظ على دقة التشخيص.'
     ]
   };
 };
