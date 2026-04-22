@@ -1,128 +1,136 @@
-import { AdMetrics, BenchmarkSettings, BusinessInputs, DiagnosisItem, LandingPageAuditInput, Severity } from '@/lib/types';
+import { CsvMapping, DiagnosisOutput, FinalDecision, FunnelMetrics, MissingMetric } from '@/lib/types';
 
-export type ComputedMetrics = {
-  cpa: number;
-  roas: number;
-  hookRate: number;
-  holdRate: number;
-  outboundCtr: number;
-  lpvRate: number;
-  purchasePerLinkClick: number;
-  purchasePerOutboundClick: number;
-  purchasePerLpv: number;
-  lpToCheckoutRate: number;
-  checkoutToPurchaseRate: number;
-  costPerLpv: number;
-  marginPerOrder: number;
-  profitPerOrder: number;
-  totalProfit: number;
+const ratio = (num: number, den: number) => (den > 0 ? num / den : undefined);
+
+const hasColumn = (mapping: CsvMapping, key: keyof CsvMapping) => Boolean(mapping[key]);
+
+export const detectMissingMetrics = (mapping: CsvMapping): MissingMetric[] => {
+  const missing: MissingMetric[] = [];
+
+  if (!hasColumn(mapping, 'purchases') || !hasColumn(mapping, 'linkClicks')) {
+    missing.push({
+      key: 'purchasePerLinkClick',
+      label: 'Purchases ÷ Link clicks',
+      missingFields: [!hasColumn(mapping, 'purchases') ? 'purchases' : '', !hasColumn(mapping, 'linkClicks') ? 'linkClicks' : ''].filter(Boolean)
+    });
+  }
+
+  if (!hasColumn(mapping, 'purchases') || !hasColumn(mapping, 'landingPageViews')) {
+    missing.push({
+      key: 'purchasePerLandingPageView',
+      label: 'Purchases ÷ Landing page views',
+      missingFields: [!hasColumn(mapping, 'purchases') ? 'purchases' : '', !hasColumn(mapping, 'landingPageViews') ? 'landingPageViews' : ''].filter(Boolean)
+    });
+  }
+
+  if (!hasColumn(mapping, 'landingPageViews') || !hasColumn(mapping, 'linkClicks')) {
+    missing.push({
+      key: 'landingPageViewRate',
+      label: 'Landing page view rate',
+      missingFields: [!hasColumn(mapping, 'landingPageViews') ? 'landingPageViews' : '', !hasColumn(mapping, 'linkClicks') ? 'linkClicks' : ''].filter(Boolean)
+    });
+  }
+
+  if (!hasColumn(mapping, 'costPerResult') && !(hasColumn(mapping, 'spend') && hasColumn(mapping, 'purchases'))) {
+    missing.push({
+      key: 'costPerResult',
+      label: 'Cost per result',
+      missingFields: ['costPerResult or (spend + purchases)']
+    });
+  }
+
+  return missing;
 };
 
-const ratio = (num: number, den: number) => (den > 0 ? num / den : 0);
+export const calculateFunnelMetrics = (input: { purchases: number; linkClicks: number; landingPageViews: number; costPerResult: number }): FunnelMetrics => ({
+  purchasePerLinkClick: ratio(input.purchases, input.linkClicks),
+  purchasePerLandingPageView: ratio(input.purchases, input.landingPageViews),
+  landingPageViewRate: ratio(input.landingPageViews, input.linkClicks),
+  costPerResult: input.costPerResult > 0 ? input.costPerResult : undefined
+});
 
-export const computeMetrics = (ad: AdMetrics, business: BusinessInputs): ComputedMetrics => {
-  const revenue = ad.purchases * business.productPrice;
-  const cpa = ratio(ad.spend, ad.purchases || 1);
+const pct = (value?: number) => (value === undefined ? 'n/a' : `${(value * 100).toFixed(2)}%`);
+
+export const runDiagnosisEngine = (metrics: FunnelMetrics, missingCount: number): DiagnosisOutput => {
+  const reasoning: string[] = [];
+  const candidates: { id: string; score: number; reason: string; fix: string }[] = [];
+
+  if (metrics.purchasePerLandingPageView !== undefined) {
+    const score = Math.max(0, 0.03 - metrics.purchasePerLandingPageView);
+    candidates.push({
+      id: 'landing-conversion',
+      score,
+      reason: `Purchases ÷ LPV is ${pct(metrics.purchasePerLandingPageView)}.`,
+      fix: 'Improve landing page trust, offer clarity, and checkout reassurance.'
+    });
+  }
+
+  if (metrics.landingPageViewRate !== undefined) {
+    const score = Math.max(0, 0.65 - metrics.landingPageViewRate);
+    candidates.push({
+      id: 'post-click-drop',
+      score,
+      reason: `LPV rate is ${pct(metrics.landingPageViewRate)} which indicates post-click drop-off.`,
+      fix: 'Improve page speed, reduce redirects, and validate URL/deep-link setup.'
+    });
+  }
+
+  if (metrics.purchasePerLinkClick !== undefined) {
+    const score = Math.max(0, 0.02 - metrics.purchasePerLinkClick);
+    candidates.push({
+      id: 'click-quality-or-offer',
+      score,
+      reason: `Purchases ÷ link clicks is ${pct(metrics.purchasePerLinkClick)}.`,
+      fix: 'Tighten audience/ad message match and align ad promise with landing offer.'
+    });
+  }
+
+  if (metrics.costPerResult !== undefined) {
+    const score = metrics.costPerResult > 80 ? Math.min(1, (metrics.costPerResult - 80) / 80) : 0;
+    candidates.push({
+      id: 'cost-efficiency',
+      score,
+      reason: `Cost per result is ${metrics.costPerResult.toFixed(2)}.`,
+      fix: 'Pause expensive creatives and reallocate to better converting segments.'
+    });
+  }
+
+  const sorted = candidates.sort((a, b) => b.score - a.score);
+  const main = sorted[0];
+  const secondary = sorted[1];
+
+  if (main) reasoning.push(main.reason);
+  if (secondary) reasoning.push(secondary.reason);
+  if (!main) reasoning.push('Not enough data to identify a bottleneck.');
+
+  const confidenceBase = Math.max(0.2, 1 - missingCount * 0.2);
+  const confidence = Math.min(0.97, Number((main ? confidenceBase : 0.25).toFixed(2)));
+
   return {
-    cpa,
-    roas: ratio(revenue, ad.spend || 1),
-    hookRate: ratio(ad.threeSecViews, ad.impressions),
-    holdRate: ratio(ad.thruPlays, ad.impressions),
-    outboundCtr: ratio(ad.uniqueOutboundClicks, ad.impressions),
-    lpvRate: ratio(ad.landingPageViews, ad.linkClicks),
-    purchasePerLinkClick: ratio(ad.purchases, ad.linkClicks),
-    purchasePerOutboundClick: ratio(ad.purchases, ad.uniqueOutboundClicks),
-    purchasePerLpv: ratio(ad.purchases, ad.landingPageViews),
-    lpToCheckoutRate: ratio(ad.checkoutsInitiated, ad.landingPageViews),
-    checkoutToPurchaseRate: ratio(ad.purchases, ad.checkoutsInitiated),
-    costPerLpv: ratio(ad.spend, ad.landingPageViews),
-    marginPerOrder: business.productPrice - business.productCost - business.shippingCost - business.operationsCost,
-    profitPerOrder: business.productPrice - business.productCost - business.shippingCost - business.operationsCost - cpa,
-    totalProfit: revenue - ad.spend - ad.purchases * (business.productCost + business.shippingCost + business.operationsCost)
+    mainProblem: main ? main.id : 'insufficient-data',
+    secondaryProblem: secondary ? secondary.id : 'none',
+    confidence,
+    reasoning,
+    fixes: [main?.fix, secondary?.fix].filter(Boolean) as string[]
   };
 };
 
-const sev = (badness: number): Severity => {
-  if (badness > 0.5) return 'critical';
-  if (badness > 0.3) return 'high';
-  if (badness > 0.15) return 'medium';
-  return 'low';
-};
+export const runDecisionEngine = (metrics: FunnelMetrics, diagnosis: DiagnosisOutput): FinalDecision => {
+  const lpvToPurchase = metrics.purchasePerLandingPageView ?? 0;
+  const clickToPurchase = metrics.purchasePerLinkClick ?? 0;
+  const lpvRate = metrics.landingPageViewRate ?? 0;
 
-export const runDiagnosis = (ad: AdMetrics, b: BenchmarkSettings, computed: ComputedMetrics): DiagnosisItem[] => {
-  const result: DiagnosisItem[] = [];
-  if (computed.hookRate < b.hookRateMin) {
-    result.push({
-      id: 'hook',
-      issueKey: 'weakHookIssue',
-      reasonKey: 'weakHookReason',
-      actionKey: 'weakHookAction',
-      severity: sev((b.hookRateMin - computed.hookRate) / b.hookRateMin),
-      evidence: `Hook Rate ${(computed.hookRate * 100).toFixed(1)}% vs benchmark ${(b.hookRateMin * 100).toFixed(1)}%`
-    });
-  }
-  if (computed.hookRate >= b.hookRateMin && computed.holdRate < b.holdRateMin) {
-    result.push({
-      id: 'hold',
-      issueKey: 'weakHoldIssue',
-      reasonKey: 'weakHoldReason',
-      actionKey: 'weakHoldAction',
-      severity: sev((b.holdRateMin - computed.holdRate) / b.holdRateMin),
-      evidence: `Hold Rate ${(computed.holdRate * 100).toFixed(1)}% vs benchmark ${(b.holdRateMin * 100).toFixed(1)}%`
-    });
-  }
-  if (computed.outboundCtr < b.outboundCtrMin) {
-    result.push({
-      id: 'ctr',
-      issueKey: 'weakCtrIssue',
-      reasonKey: 'weakCtrReason',
-      actionKey: 'weakCtrAction',
-      severity: sev((b.outboundCtrMin - computed.outboundCtr) / b.outboundCtrMin),
-      evidence: `Outbound CTR ${(computed.outboundCtr * 100).toFixed(2)}% vs benchmark ${(b.outboundCtrMin * 100).toFixed(2)}%`
-    });
-  }
-  if (computed.lpvRate < b.lpvRateMin) {
-    result.push({
-      id: 'lpv',
-      issueKey: 'weakLpvIssue',
-      reasonKey: 'weakLpvReason',
-      actionKey: 'weakLpvAction',
-      severity: sev((b.lpvRateMin - computed.lpvRate) / b.lpvRateMin),
-      evidence: `LPV Rate ${(computed.lpvRate * 100).toFixed(1)}% vs benchmark ${(b.lpvRateMin * 100).toFixed(1)}%`
-    });
-  }
-  if (computed.purchasePerLpv < b.purchaseFromLpvMin) {
-    result.push({
-      id: 'lpv-purchase',
-      issueKey: 'weakLpvPurchaseIssue',
-      reasonKey: 'weakLpvPurchaseReason',
-      actionKey: 'weakLpvPurchaseAction',
-      severity: sev((b.purchaseFromLpvMin - computed.purchasePerLpv) / b.purchaseFromLpvMin),
-      evidence: `Purchase/LPV ${(computed.purchasePerLpv * 100).toFixed(2)}% vs benchmark ${(b.purchaseFromLpvMin * 100).toFixed(2)}%`
-    });
-  }
-  if (computed.lpToCheckoutRate > 0.1 && computed.checkoutToPurchaseRate < b.checkoutToPurchaseMin) {
-    result.push({
-      id: 'checkout',
-      issueKey: 'checkoutFrictionIssue',
-      reasonKey: 'checkoutFrictionReason',
-      actionKey: 'checkoutFrictionAction',
-      severity: sev((b.checkoutToPurchaseMin - computed.checkoutToPurchaseRate) / b.checkoutToPurchaseMin),
-      evidence: `Checkout→Purchase ${(computed.checkoutToPurchaseRate * 100).toFixed(1)}% vs benchmark ${(b.checkoutToPurchaseMin * 100).toFixed(1)}%`
-    });
-  }
-  return result.sort((a, c) => ({ low: 1, medium: 2, high: 3, critical: 4 }[c.severity] - { low: 1, medium: 2, high: 3, critical: 4 }[a.severity]));
-};
+  let decision: FinalDecision['decision'] = 'hold';
+  if (lpvToPurchase >= 0.03 && lpvRate >= 0.7) decision = 'scale';
+  if (lpvToPurchase < 0.01 || clickToPurchase < 0.005) decision = 'kill';
 
-export const landingPageScore = (audit: LandingPageAuditInput): number => {
-  const values = [
-    audit.pageSpeedScore,
-    audit.mobileUsabilityScore,
-    audit.headlineClarityScore,
-    audit.ctaVisibilityScore,
-    audit.trustElementsScore,
-    audit.offerClarityScore,
-    audit.structureFlowScore
-  ];
-  return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+  return {
+    decision,
+    mainBottleneck: diagnosis.mainProblem,
+    nextActions: [
+      diagnosis.fixes[0] ?? 'Complete missing columns and rerun analysis.',
+      'Validate tracking consistency for clicks, LPV, and purchases over the same date range.',
+      'Test one change at a time and re-evaluate after statistically meaningful spend.'
+    ]
+  };
 };

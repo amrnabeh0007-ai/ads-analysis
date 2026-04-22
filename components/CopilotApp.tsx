@@ -1,37 +1,22 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { defaultAudit, defaultBenchmarks, defaultBusiness, defaultMetrics, demoScenarios } from '@/data/mockData';
-import { t, severityLabels } from '@/lib/i18n';
-import { computeMetrics, landingPageScore, runDiagnosis } from '@/lib/diagnosis';
-import { AdMetrics, BenchmarkSettings, BusinessInputs, DemoScenario, Lang, LandingPageAuditInput, Severity } from '@/lib/types';
+import { calculateFunnelMetrics, detectMissingMetrics, runDecisionEngine, runDiagnosisEngine } from '@/lib/diagnosis';
+import { CsvMapping, DataMode, GroupedCampaignData } from '@/lib/types';
+import { demoMetrics } from '@/data/mockData';
 
-const tabs = ['dashboard', 'funnel', 'creative', 'landing', 'product', 'strategy', 'report', 'inputs', 'settings'] as const;
-const requiredMetricFields: (keyof AdMetrics)[] = [
-  'spend',
-  'purchases',
-  'impressions',
-  'threeSecViews',
-  'thruPlays',
-  'linkClicks',
-  'uniqueOutboundClicks',
-  'landingPageViews',
-  'checkoutsInitiated',
-  'contentViews',
-  'costPerResult'
-];
+const requiredMetricFields: Array<keyof CsvMapping> = ['spend', 'purchases', 'linkClicks', 'landingPageViews', 'costPerResult'];
+const groupingFields: Array<keyof CsvMapping> = ['campaignName', 'productName', 'creativeName'];
 
-const sevClass: Record<Severity, string> = {
-  low: 'bg-emerald-500/15 text-emerald-300',
-  medium: 'bg-amber-500/15 text-amber-300',
-  high: 'bg-orange-500/15 text-orange-300',
-  critical: 'bg-red-500/15 text-red-300'
+const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const parseNum = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const cleaned = String(value).replace(/[$,%\s]/g, '').replace(/,/g, '');
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
 };
-
-const percent = (v: number) => `${(v * 100).toFixed(2)}%`;
-const money = (v: number) => `$${v.toFixed(2)}`;
-
 
 const parseCsvText = (text: string): Record<string, string>[] => {
   const rows: string[][] = [];
@@ -42,7 +27,6 @@ const parseCsvText = (text: string): Record<string, string>[] => {
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
     const next = text[i + 1];
-
     if (char === '"') {
       if (inQuotes && next === '"') {
         current += '"';
@@ -52,13 +36,11 @@ const parseCsvText = (text: string): Record<string, string>[] => {
       }
       continue;
     }
-
     if (char === ',' && !inQuotes) {
       row.push(current.trim());
       current = '';
       continue;
     }
-
     if ((char === '\n' || char === '\r') && !inQuotes) {
       if (char === '\r' && next === '\n') i += 1;
       if (current.length > 0 || row.length > 0) {
@@ -69,7 +51,6 @@ const parseCsvText = (text: string): Record<string, string>[] => {
       current = '';
       continue;
     }
-
     current += char;
   }
 
@@ -79,7 +60,6 @@ const parseCsvText = (text: string): Record<string, string>[] => {
   }
 
   if (!rows.length) return [];
-
   const headers = rows[0];
   return rows.slice(1).map((values) => {
     const obj: Record<string, string> = {};
@@ -90,572 +70,280 @@ const parseCsvText = (text: string): Record<string, string>[] => {
   });
 };
 
-const parseNum = (value: string | number | null | undefined) => {
-  if (value === null || value === undefined) return 0;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
-  const cleaned = String(value).replace(/[$,%\s]/g, '').replace(/,/g, '');
-  const parsed = Number(cleaned);
-  return Number.isFinite(parsed) ? parsed : 0;
-};
+const autoMapColumns = (headers: string[]): CsvMapping => {
+  const synonyms: Record<keyof CsvMapping, string[]> = {
+    campaignName: ['campaignname', 'campaign'],
+    productName: ['product', 'productname', 'itemname'],
+    creativeName: ['adname', 'ad', 'creative', 'creativename'],
+    spend: ['amountspentusd', 'amountspent', 'spend', 'cost'],
+    purchases: ['purchases', 'purchase', 'websitepurchases'],
+    linkClicks: ['linkclicks', 'clickslink', 'outboundclicks', 'uniquelinkclicks'],
+    landingPageViews: ['landingpageviews', 'lpv', 'websitelandingpageviews'],
+    costPerResult: ['costperresult', 'cppurchase', 'costperpurchase']
+  };
 
-const aggregateMappedMetrics = (rows: Record<string, string>[], mapping: Partial<Record<keyof AdMetrics, string>>): AdMetrics => {
-  const output: AdMetrics = { ...defaultMetrics };
+  const normalized = headers.map((h) => ({ original: h, key: normalize(h) }));
+  const mapping: CsvMapping = {};
 
-  requiredMetricFields.forEach((field) => {
-    const mappedCol = mapping[field];
-    if (!mappedCol) {
-      output[field] = field === 'costPerResult' ? parseNum(output.costPerResult) : 0;
-      return;
-    }
-
-    const sum = rows.reduce((total, row) => total + parseNum(row[mappedCol]), 0);
-    output[field] = sum;
+  (Object.keys(synonyms) as Array<keyof CsvMapping>).forEach((field) => {
+    const hit = normalized.find((col) => synonyms[field].some((s) => col.key.includes(s)));
+    if (hit) mapping[field] = hit.original;
   });
 
-  if (output.costPerResult <= 0 && output.purchases > 0) {
-    output.costPerResult = output.spend / output.purchases;
-  }
+  return mapping;
+};
 
-  return output;
+const parseProductFromCampaign = (campaign: string) => {
+  if (!campaign) return 'Unlabeled Product';
+  const cleaned = campaign.replace(/\s+/g, ' ').trim();
+  const separators = ['|', ' - ', '_', ' / ', '>'];
+  for (const sep of separators) {
+    if (cleaned.includes(sep)) {
+      const candidate = cleaned.split(sep)[0].trim();
+      if (candidate) return candidate;
+    }
+  }
+  return cleaned;
 };
 
 export default function CopilotApp() {
-  const [lang, setLang] = useState<Lang>('en');
-  const [tab, setTab] = useState<(typeof tabs)[number]>('dashboard');
-  const [metrics, setMetrics] = useState<AdMetrics>(defaultMetrics);
-  const [business, setBusiness] = useState<BusinessInputs>(defaultBusiness);
-  const [benchmarks, setBenchmarks] = useState<BenchmarkSettings>(defaultBenchmarks);
-  const [audit, setAudit] = useState<LandingPageAuditInput>(defaultAudit);
-
-  const [dataMode, setDataMode] = useState<'demo' | 'upload'>('demo');
-  const [entryMethod, setEntryMethod] = useState<'csv' | 'manual'>('csv');
-  const [uploadStep, setUploadStep] = useState<'source' | 'mapping' | 'manual' | 'review'>('source');
+  const [dataMode, setDataMode] = useState<DataMode>('uploaded');
   const [fileName, setFileName] = useState('');
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [parseError, setParseError] = useState('');
-  const [uploadSuccess, setUploadSuccess] = useState('');
   const [csvColumns, setCsvColumns] = useState<string[]>([]);
   const [csvRows, setCsvRows] = useState<Record<string, string>[]>([]);
-  const [mapping, setMapping] = useState<Partial<Record<keyof AdMetrics, string>>>({});
-  const [mappingWarning, setMappingWarning] = useState('');
-  const [manualDraft, setManualDraft] = useState<AdMetrics>({ ...defaultMetrics, ...Object.fromEntries(requiredMetricFields.map((f) => [f, 0])) } as AdMetrics);
+  const [mapping, setMapping] = useState<CsvMapping>({});
+  const [uploadError, setUploadError] = useState('');
 
-  const computed = useMemo(() => computeMetrics(metrics, business), [metrics, business]);
-  const diagnoses = useMemo(() => runDiagnosis(metrics, benchmarks, computed), [metrics, benchmarks, computed]);
+  const [selectedProduct, setSelectedProduct] = useState('');
+  const [selectedCampaign, setSelectedCampaign] = useState('');
+  const [selectedCreative, setSelectedCreative] = useState('');
 
-  const accountHealth = Math.max(0, Math.round(100 - diagnoses.length * 13 - Math.max(0, (business.breakEvenCPA - computed.cpa) * -1)));
-  const creativeScore = Math.round((computed.hookRate / benchmarks.hookRateMin + computed.holdRate / benchmarks.holdRateMin + computed.outboundCtr / benchmarks.outboundCtrMin) * 33.3);
-  const lpScore = landingPageScore(audit);
-  const productScore = Math.max(0, Math.min(100, Math.round((computed.profitPerOrder + 40) * 1.2 + lpScore * 0.3)));
+  const hasUploadedData = csvRows.length > 0;
 
-  const dir = lang === 'ar' ? 'rtl' : 'ltr';
-
-  const chartData = [
-    { name: 'Impr', value: metrics.impressions },
-    { name: '3s', value: metrics.threeSecViews },
-    { name: 'Thru', value: metrics.thruPlays },
-    { name: 'Clicks', value: metrics.linkClicks },
-    { name: 'LPV', value: metrics.landingPageViews },
-    { name: 'Checkout', value: metrics.checkoutsInitiated },
-    { name: 'Purchases', value: metrics.purchases }
-  ];
-
-  const recommendation =
-    computed.profitPerOrder > 0 && computed.roas >= business.targetROAS ? t(lang, 'scale') : computed.profitPerOrder > -5 ? t(lang, 'hold') : t(lang, 'kill');
-
-  const topRecommendations = diagnoses.slice(0, 3);
-
-  const onScenario = (scenario: DemoScenario) => {
-    setMetrics(scenario.metrics);
-    setAudit(scenario.audit);
-    setDataMode('demo');
-  };
-
-  const resetUpload = () => {
-    setUploadStep('source');
-    setFileName('');
-    setParseError('');
-    setUploadSuccess('');
-    setCsvColumns([]);
-    setCsvRows([]);
-    setMapping({});
-    setMappingWarning('');
-    setEntryMethod('csv');
-  };
-
-  const handleCsvFile = async (file: File) => {
-    setParseError('');
-    setUploadSuccess('');
-    setMappingWarning('');
-    setFileName(file.name);
-
-    try {
-      const text = await file.text();
-      const rows = parseCsvText(text).filter((row) => Object.values(row).some((value) => String(value || '').trim().length > 0));
-
-      if (!rows.length) {
-        setParseError(t(lang, 'emptyCsv'));
-        return;
+  const groupedData = useMemo(() => {
+    const sourceRows = dataMode === 'demo' ? [
+      {
+        Campaign: 'Demo Product | Testing Campaign',
+        Creative: 'Demo Creative A',
+        Spend: String(demoMetrics.spend),
+        Purchases: String(demoMetrics.purchases),
+        'Link Clicks': String(demoMetrics.linkClicks),
+        'Landing Page Views': String(demoMetrics.landingPageViews),
+        'Cost Per Result': String(demoMetrics.costPerResult)
       }
+    ] : csvRows;
 
-      const headers = Object.keys(rows[0]);
-      setCsvRows(rows);
-      setCsvColumns(headers);
-      setUploadSuccess(t(lang, 'uploadSuccess'));
+    const activeMapping = dataMode === 'demo'
+      ? {
+          campaignName: 'Campaign',
+          creativeName: 'Creative',
+          spend: 'Spend',
+          purchases: 'Purchases',
+          linkClicks: 'Link Clicks',
+          landingPageViews: 'Landing Page Views',
+          costPerResult: 'Cost Per Result'
+        }
+      : mapping;
 
-      const nextMapping: Partial<Record<keyof AdMetrics, string>> = {};
-      requiredMetricFields.forEach((field) => {
-        const found = headers.find((h) => h.toLowerCase().replace(/\s+/g, '') === field.toLowerCase().replace(/\s+/g, ''));
-        if (found) nextMapping[field] = found;
-      });
-      setMapping(nextMapping);
-      setUploadStep('mapping');
-    } catch (error) {
-      setParseError(error instanceof Error ? error.message : t(lang, 'csvParseError'));
-    }
-  };
+    const groups: GroupedCampaignData[] = sourceRows.map((row) => {
+      const campaign = activeMapping.campaignName ? row[activeMapping.campaignName] || 'Unknown Campaign' : 'Unknown Campaign';
+      const product = activeMapping.productName ? row[activeMapping.productName] || 'Unlabeled Product' : parseProductFromCampaign(campaign);
+      const creative = activeMapping.creativeName ? row[activeMapping.creativeName] || 'No Creative' : 'No Creative';
+      return { product, campaign, creative, rows: [row] };
+    });
 
-  const applyMapping = () => {
-    const missing = requiredMetricFields.filter((field) => !mapping[field]);
-    if (missing.length) {
-      setMappingWarning(`${t(lang, 'mappingIncomplete')}: ${missing.join(', ')}`);
+    const merged = new Map<string, GroupedCampaignData>();
+    groups.forEach((g) => {
+      const key = `${g.product}__${g.campaign}__${g.creative}`;
+      const existing = merged.get(key);
+      if (existing) existing.rows.push(...g.rows);
+      else merged.set(key, { ...g });
+    });
+
+    return Array.from(merged.values());
+  }, [csvRows, dataMode, mapping]);
+
+  const productOptions = useMemo(() => Array.from(new Set(groupedData.map((g) => g.product))), [groupedData]);
+  const campaignOptions = useMemo(() => Array.from(new Set(groupedData.filter((g) => g.product === selectedProduct).map((g) => g.campaign))), [groupedData, selectedProduct]);
+  const creativeOptions = useMemo(() => Array.from(new Set(groupedData.filter((g) => g.product === selectedProduct && g.campaign === selectedCampaign).map((g) => g.creative))), [groupedData, selectedProduct, selectedCampaign]);
+
+  const selectedRows = useMemo(() => {
+    const found = groupedData.filter((g) => g.product === selectedProduct && g.campaign === selectedCampaign && g.creative === selectedCreative);
+    return found.flatMap((f) => f.rows);
+  }, [groupedData, selectedProduct, selectedCampaign, selectedCreative]);
+
+  const aggregated = useMemo(() => {
+    const read = (field: keyof CsvMapping) => {
+      const col = mapping[field];
+      if (!col) return 0;
+      return selectedRows.reduce((sum, row) => sum + parseNum(row[col]), 0);
+    };
+
+    if (dataMode === 'demo') return demoMetrics;
+
+    const purchases = read('purchases');
+    const spend = read('spend');
+    const providedCostPerResult = read('costPerResult');
+
+    return {
+      purchases,
+      spend,
+      linkClicks: read('linkClicks'),
+      landingPageViews: read('landingPageViews'),
+      costPerResult: providedCostPerResult > 0 ? providedCostPerResult : purchases > 0 ? spend / purchases : 0
+    };
+  }, [dataMode, mapping, selectedRows]);
+
+  const missingMetrics = useMemo(() => detectMissingMetrics(mapping), [mapping]);
+  const funnelMetrics = useMemo(() => calculateFunnelMetrics(aggregated), [aggregated]);
+  const diagnosis = useMemo(() => runDiagnosisEngine(funnelMetrics, missingMetrics.length), [funnelMetrics, missingMetrics.length]);
+  const decision = useMemo(() => runDecisionEngine(funnelMetrics, diagnosis), [funnelMetrics, diagnosis]);
+
+  const readyForAnalysis = dataMode === 'demo' || (hasUploadedData && selectedProduct && selectedCampaign && selectedCreative);
+
+  const handleCsvUpload = async (file: File) => {
+    setUploadError('');
+    setFileName(file.name);
+    const text = await file.text();
+    const parsedRows = parseCsvText(text).filter((row) => Object.values(row).some((v) => String(v).trim()));
+    if (!parsedRows.length) {
+      setUploadError('CSV is empty. Please upload a valid Meta Ads export.');
       return;
     }
-
-    const mappedMetrics = aggregateMappedMetrics(csvRows, mapping);
-    setMetrics(mappedMetrics);
-    setUploadStep('review');
-    setMappingWarning('');
+    const headers = Object.keys(parsedRows[0]);
+    setCsvRows(parsedRows);
+    setCsvColumns(headers);
+    setMapping(autoMapColumns(headers));
+    setDataMode('uploaded');
+    setSelectedProduct('');
+    setSelectedCampaign('');
+    setSelectedCreative('');
   };
 
-  const submitManualEntry = () => {
-    setMetrics({ ...manualDraft, costPerResult: manualDraft.costPerResult || (manualDraft.purchases > 0 ? manualDraft.spend / manualDraft.purchases : 0) });
-    setUploadStep('review');
-    setParseError('');
-  };
+  const modeLabel = dataMode === 'demo' ? 'Demo Mode' : 'Uploaded Data';
 
   return (
-    <main dir={dir} className={`min-h-screen p-6 ${lang === 'ar' ? 'font-arabic' : ''}`}>
-      <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">{t(lang, 'appTitle')}</h1>
-          <p className="text-sm text-slate-300">{t(lang, 'appSubtitle')}</p>
-        </div>
-        <div className="card flex items-center gap-2 p-2">
-          <span className="text-sm">{t(lang, 'language')}</span>
-          <button className={`rounded px-3 py-1 ${lang === 'en' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => setLang('en')}>
-            {t(lang, 'english')}
-          </button>
-          <button className={`rounded px-3 py-1 ${lang === 'ar' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => setLang('ar')}>
-            {t(lang, 'arabic')}
-          </button>
-        </div>
+    <main className="mx-auto min-h-screen max-w-6xl p-6">
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold">Ecommerce Funnel Analysis — Phase 1</h1>
+        <p className="text-sm text-slate-300">Flow: Upload → Auto map → Select product → See diagnosis → Get decision.</p>
       </header>
 
-      <section className="mb-5 card flex flex-wrap items-center gap-3 text-sm">
-        <span className="text-slate-300">{t(lang, 'mode')}:</span>
-        <button
-          className={`rounded px-3 py-1 ${dataMode === 'demo' ? 'bg-blue-600' : 'bg-slate-700'}`}
-          onClick={() => {
-            setDataMode('demo');
-            setMetrics(defaultMetrics);
-          }}
-        >
-          {t(lang, 'demoMode')}
-        </button>
-        <button
-          className={`rounded px-3 py-1 ${dataMode === 'upload' ? 'bg-blue-600' : 'bg-slate-700'}`}
-          onClick={() => {
-            setDataMode('upload');
-            setUploadStep('source');
-          }}
-        >
-          {t(lang, 'uploadYourData')}
-        </button>
-        <span className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-300">
-          {dataMode === 'demo' ? t(lang, 'usingDemoData') : `${t(lang, 'usingUploadedData')}${fileName ? `: ${fileName}` : ''}`}
-        </span>
+      <section className="mb-5 rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+          <strong>Data Source:</strong>
+          <span className="rounded bg-slate-800 px-2 py-1">{modeLabel}</span>
+          {fileName && dataMode === 'uploaded' && <span className="rounded bg-slate-800 px-2 py-1">{fileName}</span>}
+          <button className="rounded bg-slate-700 px-3 py-1" onClick={() => setDataMode('demo')}>Use Demo Mode</button>
+          <button className="rounded bg-slate-700 px-3 py-1" onClick={() => setDataMode('uploaded')}>Use Uploaded Data</button>
+        </div>
+
+        <div className="rounded-lg border border-dashed border-slate-600 p-4">
+          <p className="mb-2 text-sm">Upload Meta Ads CSV:</p>
+          <input
+            type="file"
+            accept=".csv"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleCsvUpload(file);
+            }}
+          />
+          {uploadError && <p className="mt-2 text-sm text-red-300">{uploadError}</p>}
+        </div>
       </section>
 
-      {dataMode === 'upload' && (
-        <section className="mb-5 card space-y-4">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <button className={`rounded px-3 py-1 ${entryMethod === 'csv' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => { setEntryMethod('csv'); setUploadStep('source'); }}>
-              {t(lang, 'uploadCsv')}
-            </button>
-            <button className={`rounded px-3 py-1 ${entryMethod === 'manual' ? 'bg-blue-600' : 'bg-slate-700'}`} onClick={() => { setEntryMethod('manual'); setUploadStep('manual'); }}>
-              {t(lang, 'manualEntry')}
-            </button>
-            <button onClick={resetUpload} className="rounded bg-slate-700 px-3 py-1">
-              {t(lang, 'resetUpload')}
-            </button>
-          </div>
-
-          {entryMethod === 'csv' && uploadStep === 'source' && (
-            <>
-              <div
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  setIsDragOver(true);
-                }}
-                onDragLeave={() => setIsDragOver(false)}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  setIsDragOver(false);
-                  const file = event.dataTransfer.files?.[0];
-                  if (file) handleCsvFile(file);
-                }}
-                className={`rounded-xl border-2 border-dashed p-6 text-center ${isDragOver ? 'border-blue-400 bg-blue-500/10' : 'border-slate-700 bg-slate-900'}`}
-              >
-                <p className="mb-2 text-sm text-slate-300">{t(lang, 'dragDropCsv')}</p>
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) handleCsvFile(file);
-                  }}
-                  className="mx-auto block"
-                />
-              </div>
-              {uploadSuccess && <p className="text-sm text-emerald-300">{uploadSuccess}</p>}
-              {parseError && <p className="text-sm text-red-300">{t(lang, 'csvParseError')}: {parseError}</p>}
-              <a href="/sample-template.csv" className="text-sm underline">
-                {t(lang, 'csvTemplate')}
-              </a>
-            </>
-          )}
-
-          {entryMethod === 'csv' && uploadStep === 'mapping' && (
-            <div className="space-y-3">
-              <p className="font-semibold">{t(lang, 'mapColumns')}</p>
-              <p className="text-sm text-slate-300">{t(lang, 'mapColumnsHint')}</p>
-              <div className="grid gap-2 md:grid-cols-2">
-                {requiredMetricFields.map((field) => (
-                  <label key={field} className="flex items-center justify-between gap-3 rounded bg-slate-800 p-2 text-sm">
-                    <span>{field}</span>
-                    <select
-                      value={mapping[field] ?? ''}
-                      onChange={(event) => setMapping((prev) => ({ ...prev, [field]: event.target.value || undefined }))}
-                      className="w-52 rounded bg-slate-900 p-1"
-                    >
-                      <option value="">{t(lang, 'selectColumn')}</option>
-                      {csvColumns.map((col) => (
-                        <option key={col} value={col}>
-                          {col}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ))}
-              </div>
-              {mappingWarning && <p className="text-sm text-amber-300">{mappingWarning}</p>}
-              <button onClick={applyMapping} className="rounded bg-blue-600 px-4 py-2 text-sm">
-                {t(lang, 'applyMapping')}
-              </button>
-            </div>
-          )}
-
-          {entryMethod === 'manual' && uploadStep === 'manual' && (
-            <div className="space-y-3">
-              <p className="font-semibold">{t(lang, 'manualEntry')}</p>
-              <div className="grid gap-2 md:grid-cols-2">
-                {requiredMetricFields.map((field) => (
-                  <label key={field} className="flex items-center justify-between gap-3 rounded bg-slate-800 p-2 text-sm">
-                    <span>{field}</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={manualDraft[field]}
-                      onChange={(event) => setManualDraft((prev) => ({ ...prev, [field]: parseNum(event.target.value) }))}
-                      className="w-44 rounded bg-slate-900 p-1"
-                    />
-                  </label>
-                ))}
-              </div>
-              <button onClick={submitManualEntry} className="rounded bg-blue-600 px-4 py-2 text-sm">
-                {t(lang, 'runAnalysis')}
-              </button>
-            </div>
-          )}
-
-          {uploadStep === 'review' && (
-            <div className="rounded bg-emerald-500/10 p-3 text-sm text-emerald-300">
-              {t(lang, 'analysisReady')}
-            </div>
-          )}
+      {!hasUploadedData && dataMode === 'uploaded' && (
+        <section className="rounded-xl border border-slate-700 bg-slate-900 p-6 text-sm text-slate-300">
+          <p className="font-semibold">Empty state</p>
+          <p>No metrics are shown until a valid CSV is uploaded and a product/campaign/creative is selected.</p>
         </section>
       )}
 
-      <nav className="mb-5 grid grid-cols-2 gap-2 md:grid-cols-5 lg:grid-cols-9">
-        {tabs.map((tb) => (
-          <button key={tb} onClick={() => setTab(tb)} className={`rounded-lg border px-3 py-2 text-sm ${tab === tb ? 'border-blue-500 bg-blue-500/20' : 'border-slate-800 bg-slate-900'}`}>
-            {t(lang, tb)}
-          </button>
-        ))}
-      </nav>
+      {hasUploadedData && dataMode === 'uploaded' && (
+        <section className="mb-5 rounded-xl border border-slate-700 bg-slate-900 p-4">
+          <h2 className="mb-3 text-lg font-semibold">Auto-mapping (manual override supported)</h2>
+          <div className="grid gap-2 md:grid-cols-2">
+            {[...groupingFields, ...requiredMetricFields].map((field) => (
+              <label key={field} className="flex items-center justify-between gap-3 rounded bg-slate-800 p-2 text-sm">
+                <span>{field}</span>
+                <select
+                  value={mapping[field] ?? ''}
+                  onChange={(e) => setMapping((prev) => ({ ...prev, [field]: e.target.value || undefined }))}
+                  className="w-56 rounded bg-slate-900 p-1"
+                >
+                  <option value="">Not mapped</option>
+                  {csvColumns.map((col) => (
+                    <option key={col} value={col}>{col}</option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        </section>
+      )}
 
-      <section className="mb-5 grid gap-3 md:grid-cols-4">
-        {[
-          { k: 'accountHealthScore', v: accountHealth },
-          { k: 'creativeQualityScore', v: creativeScore },
-          { k: 'landingScore', v: lpScore },
-          { k: 'productPotential', v: productScore }
-        ].map((c) => (
-          <div key={c.k} className="card">
-            <p className="text-sm text-slate-400">{t(lang, c.k)}</p>
-            <p className="text-3xl font-bold">{Math.max(0, Math.min(100, c.v))}</p>
+      {(hasUploadedData || dataMode === 'demo') && (
+        <section className="mb-5 rounded-xl border border-slate-700 bg-slate-900 p-4">
+          <h2 className="mb-3 text-lg font-semibold">Product grouping and selection</h2>
+          <div className="grid gap-3 md:grid-cols-3">
+            <select className="rounded bg-slate-800 p-2" value={selectedProduct} onChange={(e) => { setSelectedProduct(e.target.value); setSelectedCampaign(''); setSelectedCreative(''); }}>
+              <option value="">Select product</option>
+              {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <select className="rounded bg-slate-800 p-2" value={selectedCampaign} onChange={(e) => { setSelectedCampaign(e.target.value); setSelectedCreative(''); }} disabled={!selectedProduct}>
+              <option value="">Select campaign</option>
+              {campaignOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <select className="rounded bg-slate-800 p-2" value={selectedCreative} onChange={(e) => setSelectedCreative(e.target.value)} disabled={!selectedCampaign}>
+              <option value="">Select creative</option>
+              {creativeOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
-        ))}
-      </section>
+        </section>
+      )}
 
-      {tab === 'dashboard' && (
-        <section className="grid gap-4 lg:grid-cols-3">
-          <div className="card lg:col-span-2 h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="name" stroke="#cbd5e1" />
-                <YAxis stroke="#cbd5e1" />
-                <Tooltip />
-                <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card space-y-2 text-sm">
-            <p>Spend: {money(metrics.spend)}</p>
-            <p>Purchases: {metrics.purchases}</p>
-            <p>CPA: {money(computed.cpa)}</p>
-            <p>ROAS: {computed.roas.toFixed(2)}</p>
-            <p>Impressions: {metrics.impressions.toLocaleString()}</p>
-            <p>Link Clicks: {metrics.linkClicks}</p>
-            <p>Unique Outbound Clicks: {metrics.uniqueOutboundClicks}</p>
-            <p>Landing Page Views: {metrics.landingPageViews}</p>
-            <p>Checkouts Initiated: {metrics.checkoutsInitiated}</p>
-            <p>Cost/Result: {money(metrics.costPerResult)}</p>
-            <p>Cost/LPV: {money(computed.costPerLpv)}</p>
-            <p>LPV Rate: {percent(computed.lpvRate)}</p>
-          </div>
-          <div className="card lg:col-span-3 grid gap-3 md:grid-cols-3">
-            {topRecommendations.length ? (
-              topRecommendations.map((d) => (
-                <div key={d.id} className="rounded bg-slate-800 p-3 text-sm">
-                  <p className="mb-1 font-semibold">{t(lang, d.issueKey)}</p>
-                  <p className="mb-1 text-xs text-slate-300">{d.evidence}</p>
-                  <p className="mb-2 text-xs text-slate-400">{t(lang, d.reasonKey)}</p>
-                  <p className="text-xs text-blue-300">{t(lang, d.actionKey)}</p>
-                </div>
-              ))
-            ) : (
-              <p className="text-sm text-emerald-300">{t(lang, 'noCriticalIssues')}</p>
+      {readyForAnalysis && (
+        <>
+          <section className="mb-5 rounded-xl border border-slate-700 bg-slate-900 p-4">
+            <h2 className="mb-3 text-lg font-semibold">Real funnel diagnosis (no fake values)</h2>
+            <div className="grid gap-2 text-sm md:grid-cols-2">
+              <p>Purchases ÷ Link clicks: {funnelMetrics.purchasePerLinkClick !== undefined ? `${(funnelMetrics.purchasePerLinkClick * 100).toFixed(2)}%` : 'Missing data'}</p>
+              <p>Purchases ÷ Landing page views: {funnelMetrics.purchasePerLandingPageView !== undefined ? `${(funnelMetrics.purchasePerLandingPageView * 100).toFixed(2)}%` : 'Missing data'}</p>
+              <p>Landing page view rate: {funnelMetrics.landingPageViewRate !== undefined ? `${(funnelMetrics.landingPageViewRate * 100).toFixed(2)}%` : 'Missing data'}</p>
+              <p>Cost per result: {funnelMetrics.costPerResult !== undefined ? `$${funnelMetrics.costPerResult.toFixed(2)}` : 'Missing data'}</p>
+            </div>
+            {missingMetrics.length > 0 && (
+              <div className="mt-3 rounded bg-amber-500/10 p-3 text-sm text-amber-200">
+                <p className="font-semibold">Missing data detected:</p>
+                <ul className="list-disc pl-5">
+                  {missingMetrics.map((item) => (
+                    <li key={item.key}>{item.label}: missing {item.missingFields.join(', ')}</li>
+                  ))}
+                </ul>
+              </div>
             )}
-          </div>
-        </section>
-      )}
+          </section>
 
-      {tab === 'funnel' && (
-        <section className="card overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-slate-400">
-                <th>Step</th>
-                <th>{t(lang, 'metricValue')}</th>
-                <th>{t(lang, 'conversionRate')}</th>
-                <th>{t(lang, 'benchmark')}</th>
-                <th>{t(lang, 'severity')}</th>
-                <th>{t(lang, 'diagnosis')}</th>
-                <th>{t(lang, 'action')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {diagnoses.map((d) => (
-                <tr key={d.id} className="border-t border-slate-800 align-top">
-                  <td className="py-2">{t(lang, d.issueKey)}</td>
-                  <td>{d.evidence.split(' vs ')[0]}</td>
-                  <td>-</td>
-                  <td>{d.evidence.split(' vs ')[1]}</td>
-                  <td>
-                    <span className={`rounded px-2 py-1 text-xs ${sevClass[d.severity]}`}>{severityLabels[lang][d.severity]}</span>
-                  </td>
-                  <td>{t(lang, d.reasonKey)}</td>
-                  <td>{t(lang, d.actionKey)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      )}
+          <section className="mb-5 rounded-xl border border-slate-700 bg-slate-900 p-4 text-sm">
+            <h2 className="mb-3 text-lg font-semibold">Diagnosis engine output</h2>
+            <p><strong>Main problem:</strong> {diagnosis.mainProblem}</p>
+            <p><strong>Secondary problem:</strong> {diagnosis.secondaryProblem}</p>
+            <p><strong>Confidence:</strong> {(diagnosis.confidence * 100).toFixed(0)}%</p>
+            <p className="mt-2 font-semibold">Reasoning</p>
+            <ul className="list-disc pl-5">{diagnosis.reasoning.map((r) => <li key={r}>{r}</li>)}</ul>
+            <p className="mt-2 font-semibold">What to fix</p>
+            <ul className="list-disc pl-5">{diagnosis.fixes.map((f) => <li key={f}>{f}</li>)}</ul>
+          </section>
 
-      {tab === 'creative' && (
-        <section className="grid gap-4 lg:grid-cols-2">
-          <div className="card space-y-2 text-sm">
-            <p>Hook Rate = 3s views ÷ Impressions = {percent(computed.hookRate)}</p>
-            <p>Hold Rate = ThruPlays ÷ Impressions = {percent(computed.holdRate)}</p>
-            <p>Landing Page View Rate = LPV ÷ Link Clicks = {percent(computed.lpvRate)}</p>
-            <p>Purchases ÷ Link Clicks = {percent(computed.purchasePerLinkClick)}</p>
-            <p>Purchases ÷ Unique Outbound Clicks = {percent(computed.purchasePerOutboundClick)}</p>
-            <p>Purchases ÷ Landing Page Views = {percent(computed.purchasePerLpv)}</p>
-            <p>LP to Checkout Rate = {percent(computed.lpToCheckoutRate)}</p>
-            <p>Cost per Result = {money(metrics.costPerResult)}</p>
-            <p>Cost per LPV = {money(computed.costPerLpv)}</p>
-          </div>
-          <div className="card space-y-2">
-            {diagnoses.slice(0, 3).map((d) => (
-              <div key={d.id} className="rounded bg-slate-800 p-3 text-sm">
-                <p className="font-semibold">{t(lang, d.issueKey)}</p>
-                <p>{t(lang, d.actionKey)}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+          <section className="rounded-xl border border-slate-700 bg-slate-900 p-4 text-sm">
+            <h2 className="mb-3 text-lg font-semibold">Final decision engine</h2>
+            <p><strong>Decision:</strong> {decision.decision.toUpperCase()}</p>
+            <p><strong>Main bottleneck:</strong> {decision.mainBottleneck}</p>
+            <p className="mt-2 font-semibold">Next 3 actions</p>
+            <ol className="list-decimal pl-5">{decision.nextActions.map((a) => <li key={a}>{a}</li>)}</ol>
+          </section>
+        </>
       )}
-
-      {tab === 'landing' && (
-        <section className="grid gap-4 lg:grid-cols-2">
-          <div className="card space-y-2">
-            <label className="text-sm">{t(lang, 'lpUrl')}</label>
-            <input value={audit.url} onChange={(e) => setAudit({ ...audit, url: e.target.value })} className="w-full rounded bg-slate-800 p-2" />
-            {(
-              [
-                'pageSpeedScore',
-                'mobileUsabilityScore',
-                'headlineClarityScore',
-                'ctaVisibilityScore',
-                'trustElementsScore',
-                'offerClarityScore',
-                'structureFlowScore'
-              ] as const
-            ).map((k) => (
-              <div key={k} className="flex items-center gap-2 text-sm">
-                <span className="w-44">{k}</span>
-                <input type="range" min={0} max={100} value={audit[k]} onChange={(e) => setAudit({ ...audit, [k]: Number(e.target.value) })} className="flex-1" />
-                <span>{audit[k]}</span>
-              </div>
-            ))}
-          </div>
-          <div className="card">
-            <p className="text-xl font-bold">
-              {t(lang, 'landingScore')}: {lpScore}/100
-            </p>
-            <p className="mt-2 text-sm text-slate-300">Likely issues: page speed friction, low trust blocks, weak offer framing.</p>
-            <p className="mt-2 text-sm">Suggested improvements: compress media, sticky CTA, add testimonials, clarify shipping and returns.</p>
-          </div>
-        </section>
-      )}
-
-      {tab === 'product' && (
-        <section className="grid gap-4 lg:grid-cols-2">
-          <div className="card space-y-2 text-sm">
-            <p>Margin / order: {money(computed.marginPerOrder)}</p>
-            <p>Profit / order after ads: {money(computed.profitPerOrder)}</p>
-            <p>Total profit estimate: {money(computed.totalProfit)}</p>
-            <p>Break-even CPA: {money(business.breakEvenCPA)}</p>
-            <p className={computed.profitPerOrder > 0 ? 'text-emerald-300' : 'text-red-300'}>{computed.profitPerOrder > 0 ? t(lang, 'profitable') : t(lang, 'notProfitable')}</p>
-          </div>
-          <div className="card">
-            <p className="font-semibold">Decision: {recommendation}</p>
-            <p className="text-sm text-slate-300 mt-2">
-              If profitability is weak despite good conversion, treat as pricing/COGS issue and avoid scaling until economics improve.
-            </p>
-          </div>
-        </section>
-      )}
-
-      {tab === 'strategy' && (
-        <section className="card space-y-2 text-sm">
-          <p>- {computed.roas < business.targetROAS ? 'Use ABO for controlled testing until stable winners emerge.' : 'Move winning ad sets into CBO for scale.'}</p>
-          <p>- {computed.hookRate < benchmarks.hookRateMin ? 'Prioritize new hooks before broad scaling.' : 'Rotate creatives to prevent fatigue every 5-7 days.'}</p>
-          <p>- {computed.outboundCtr < benchmarks.outboundCtrMin ? 'Start with engagement/video-view campaigns to refine messaging signal.' : 'Go direct conversion with structured testing matrix.'}</p>
-          <p>- {computed.lpvRate < benchmarks.lpvRateMin ? 'Improve landing page speed and mobile UX before spend increase.' : 'Landing page is acceptable for incrementally higher budgets.'}</p>
-        </section>
-      )}
-
-      {tab === 'report' && (
-        <section className="card space-y-3">
-          <p>
-            <strong>{t(lang, 'mainBottleneck')}:</strong> {diagnoses[0] ? t(lang, diagnoses[0].issueKey) : t(lang, 'noCriticalIssues')}
-          </p>
-          <p>
-            <strong>{t(lang, 'secondaryBottleneck')}:</strong> {diagnoses[1] ? t(lang, diagnoses[1].issueKey) : 'N/A'}
-          </p>
-          <p>
-            <strong>{t(lang, 'rootCause')}:</strong> {diagnoses[0] ? t(lang, diagnoses[0].reasonKey) : 'Healthy conversion chain.'}
-          </p>
-          <p>
-            <strong>{t(lang, 'nextActions')}:</strong>
-          </p>
-          <ol className="list-decimal ps-5">
-            {diagnoses.slice(0, 3).map((d) => (
-              <li key={d.id}>{t(lang, d.actionKey)}</li>
-            ))}
-          </ol>
-          <p>
-            <strong>{t(lang, 'campaignStructure')}:</strong> {computed.roas > business.targetROAS ? 'CBO + controlled duplication of winners' : 'ABO testing pods with strict kill rules'}
-          </p>
-          <p>
-            <strong>{t(lang, 'landingPriority')}:</strong> Speed, trust, checkout clarity.
-          </p>
-          <p>
-            <strong>{t(lang, 'creativePriority')}:</strong> Hooks, pacing, offer communication.
-          </p>
-          <button onClick={() => window.print()} className="rounded bg-blue-600 px-4 py-2 text-sm">
-            {t(lang, 'exportReport')}
-          </button>
-        </section>
-      )}
-
-      {tab === 'inputs' && (
-        <section className="grid gap-4 lg:grid-cols-2">
-          <div className="card space-y-2 text-sm">
-            <p className="font-semibold">{t(lang, 'scenariosTitle')}</p>
-            {demoScenarios.map((s) => (
-              <button key={s.id} onClick={() => onScenario(s)} className="block w-full rounded bg-slate-800 px-3 py-2 text-left">
-                {t(lang, s.labelKey)} — {t(lang, s.descriptionKey)}
-              </button>
-            ))}
-          </div>
-          <div className="card space-y-3 text-sm">
-            <p>{t(lang, 'inputsHint')}</p>
-            <button
-              className="rounded bg-slate-700 px-3 py-2"
-              onClick={() => {
-                setDataMode('upload');
-                setTab('dashboard');
-              }}
-            >
-              {t(lang, 'goToUploadFlow')}
-            </button>
-          </div>
-        </section>
-      )}
-
-      {tab === 'settings' && (
-        <section className="grid gap-4 lg:grid-cols-2">
-          <div className="card space-y-2">
-            <p className="font-semibold">{t(lang, 'benchmarkSettings')}</p>
-            {Object.entries(benchmarks).map(([k, v]) => (
-              <label key={k} className="flex items-center justify-between gap-3 text-sm">
-                <span>{k}</span>
-                <input type="number" step="0.01" value={v} onChange={(e) => setBenchmarks({ ...benchmarks, [k]: Number(e.target.value) })} className="w-28 rounded bg-slate-800 p-1" />
-              </label>
-            ))}
-          </div>
-          <div className="card space-y-2">
-            <p className="font-semibold">{t(lang, 'businessInputs')}</p>
-            {Object.entries(business).map(([k, v]) => (
-              <label key={k} className="flex items-center justify-between gap-3 text-sm">
-                <span>{k}</span>
-                <input type="number" step="0.1" value={v} onChange={(e) => setBusiness({ ...business, [k]: Number(e.target.value) })} className="w-28 rounded bg-slate-800 p-1" />
-              </label>
-            ))}
-          </div>
-        </section>
-      )}
-
-      <footer className="mt-6 card text-xs text-slate-400">
-        <p>{t(lang, 'formulas')}: Hook Rate=3s/impressions, Hold Rate=ThruPlays/impressions, LPV Rate=LPV/link clicks, Purchases/LPV, LP-to-Checkout=checkouts/LPV.</p>
-      </footer>
     </main>
   );
 }
