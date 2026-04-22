@@ -8,47 +8,63 @@ export type AdMetrics = {
   costPerResult: number;
 };
 
-export type CsvMapping = {
-  campaignName?: string;
-  productName?: string;
-  creativeName?: string;
-  spend?: string;
-  purchases?: string;
-  linkClicks?: string;
-  landingPageViews?: string;
-  costPerResult?: string;
+export type CsvField =
+  | 'productName'
+  | 'campaignName'
+  | 'adSetName'
+  | 'creativeName'
+  | 'spend'
+  | 'impressions'
+  | 'linkClicks'
+  | 'landingPageViews'
+  | 'purchases'
+  | 'costPerResult'
+  | 'checkoutsInitiated'
+  | 'threeSecViews'
+  | 'thruPlays'
+  | 'uniqueOutboundClicks'
+  | 'contentViews'
+  | 'landingPageUrl'
+  | 'productCost'
+  | 'shippingCost'
+  | 'operationsCost';
+
+export type CsvMapping = Partial<Record<CsvField, string>>;
+
+export type MappingConfidence = 'high' | 'medium' | 'low';
+
+export type MappingResult = {
+  column?: string;
+  confidence: MappingConfidence;
+  reason: string;
 };
 
-export type FunnelMetrics = {
-  purchasePerLinkClick?: number;
-  purchasePerLandingPageView?: number;
-  landingPageViewRate?: number;
-  costPerResult?: number;
-};
-
-export type MissingMetric = {
-  key: keyof FunnelMetrics;
-  label: string;
+export type MetricDefinition = {
+  key: string;
+  labelEn: string;
+  labelAr: string;
+  formula: string;
+  tooltipAr: string;
+  value?: number;
+  percentage?: boolean;
   missingFields: string[];
 };
 
 export type DiagnosisOutput = {
-  mainProblem: string;
-  secondaryProblem: string;
-  confidence: number;
-  reasoning: string[];
-  fixes: string[];
-};
-
-export type FinalDecision = {
-  decision: 'scale' | 'hold' | 'kill';
-  mainBottleneck: string;
-  nextActions: string[];
+  mainDiagnosisEn: string;
+  mainDiagnosisAr: string;
+  secondaryDiagnosisEn: string;
+  secondaryDiagnosisAr: string;
+  confidence: 'High' | 'Medium' | 'Low';
+  nextActionsEn: string[];
+  nextActionsAr: string[];
 };
 
 export type GroupedCampaignData = {
   product: string;
+  productCode?: string;
   campaign: string;
-  creative: string;
+  adSet?: string;
+  creative?: string;
   rows: Record<string, string>[];
 };
