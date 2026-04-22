@@ -1,4 +1,5 @@
-import { Lang, Severity } from '@/lib/types';
+type Lang = 'en' | 'ar';
+type Severity = 'low' | 'medium' | 'high' | 'critical';
 
 type Dict = Record<string, string>;
 

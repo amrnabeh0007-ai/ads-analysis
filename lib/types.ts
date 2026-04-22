@@ -1,64 +1,54 @@
-export type Lang = 'en' | 'ar';
-
-export type Severity = 'low' | 'medium' | 'high' | 'critical';
+export type DataMode = 'demo' | 'uploaded';
 
 export type AdMetrics = {
   spend: number;
   purchases: number;
-  impressions: number;
-  threeSecViews: number;
-  thruPlays: number;
   linkClicks: number;
-  uniqueOutboundClicks: number;
   landingPageViews: number;
-  checkoutsInitiated: number;
-  contentViews: number;
   costPerResult: number;
 };
 
-export type BusinessInputs = {
-  productPrice: number;
-  productCost: number;
-  shippingCost: number;
-  operationsCost: number;
-  breakEvenCPA: number;
-  targetROAS: number;
-  targetProfitMargin: number;
+export type CsvMapping = {
+  campaignName?: string;
+  productName?: string;
+  creativeName?: string;
+  spend?: string;
+  purchases?: string;
+  linkClicks?: string;
+  landingPageViews?: string;
+  costPerResult?: string;
 };
 
-export type BenchmarkSettings = {
-  hookRateMin: number;
-  holdRateMin: number;
-  outboundCtrMin: number;
-  lpvRateMin: number;
-  purchaseFromLpvMin: number;
-  checkoutToPurchaseMin: number;
+export type FunnelMetrics = {
+  purchasePerLinkClick?: number;
+  purchasePerLandingPageView?: number;
+  landingPageViewRate?: number;
+  costPerResult?: number;
 };
 
-export type LandingPageAuditInput = {
-  url: string;
-  pageSpeedScore: number;
-  mobileUsabilityScore: number;
-  headlineClarityScore: number;
-  ctaVisibilityScore: number;
-  trustElementsScore: number;
-  offerClarityScore: number;
-  structureFlowScore: number;
+export type MissingMetric = {
+  key: keyof FunnelMetrics;
+  label: string;
+  missingFields: string[];
 };
 
-export type DiagnosisItem = {
-  id: string;
-  issueKey: string;
-  reasonKey: string;
-  actionKey: string;
-  severity: Severity;
-  evidence: string;
+export type DiagnosisOutput = {
+  mainProblem: string;
+  secondaryProblem: string;
+  confidence: number;
+  reasoning: string[];
+  fixes: string[];
 };
 
-export type DemoScenario = {
-  id: string;
-  labelKey: string;
-  descriptionKey: string;
-  metrics: AdMetrics;
-  audit: LandingPageAuditInput;
+export type FinalDecision = {
+  decision: 'scale' | 'hold' | 'kill';
+  mainBottleneck: string;
+  nextActions: string[];
+};
+
+export type GroupedCampaignData = {
+  product: string;
+  campaign: string;
+  creative: string;
+  rows: Record<string, string>[];
 };
